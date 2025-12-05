@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -54,44 +55,44 @@ type MediaInfoOutput struct {
 
 func main() {
 	// Parse Flags
-	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing files")
+	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
+
 	flag.Parse()
 
-	config := Config{
-		PromptMode: *promptPtr,
-	}
+	config := Config{PromptMode: *promptPtr}
 
 	log.Println("Starting Video Optimizer Daemon...")
 
-	// Create a ticker to run the check loop.
-	// Since the prompt implies a daemon, we run continuously.
-	// Here we define a run interval (e.g., every hour).
-	// For testing, one might want to run immediately.
-	runLogic(config)
+	// root context
+	ctx, cancel := context.WithCancel(context.Background())
 
-	// If you want it to actually loop forever as a daemon:
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-
-	// Handle graceful shutdown
+	// handle shutdown signals
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
+	go func() {
+		<-sigs
+		log.Println("Shutting down...")
+		cancel()
+	}()
+
+	// initial run
+	runLogic(ctx, config)
+
 	for {
 		select {
-		case <-ticker.C:
-			runLogic(config)
-		case <-sigs:
-			log.Println("Shutting down...")
+		case <-ctx.Done():
 			return
+		default:
+			runLogic(ctx, config)
 		}
 	}
 }
 
-func runLogic(config Config) {
+func runLogic(ctx context.Context, config Config) {
 	log.Println("Scanning for largest eligible video file...")
 
-	targetFile, err := findTargetFile()
+	targetFile, err := findTargetFile(ctx)
 	if err != nil {
 		log.Printf("Error searching files: %v", err)
 		return
@@ -104,36 +105,28 @@ func runLogic(config Config) {
 
 	log.Printf("Found target candidate: %s", targetFile)
 
-	// Step 2: Check with mkvmerge
-	mkvInfo, err := getMkvInfo(targetFile)
-	if err != nil {
-		log.Printf("Failed to inspect file with mkvmerge: %v", err)
+	mkvInfo, err := getMkvInfo(ctx, targetFile)
+	if err != nil || ctx.Err() != nil {
 		return
 	}
 
-	// Step 3: Check Codecs
 	if shouldSkipFile(mkvInfo) {
-		log.Println("File is already HEVC, AV1, or VVC. Skipping.")
+		log.Println("File already optimized, skipping.")
 		return
 	}
 
-	// Double check with MediaInfo --fullscan as requested
-	log.Println("Running MediaInfo --fullscan check...")
-	mediaInfo, err := getMediaInfo(targetFile)
-	if err != nil {
-		log.Printf("MediaInfo failed: %v", err)
+	mediaInfo, err := getMediaInfo(ctx, targetFile)
+	if err != nil || ctx.Err() != nil {
 		return
 	}
 
-	// Determine Resolution and Preset
 	preset := getHandbrakePreset(mediaInfo)
 	log.Printf("Selected Preset: %s", preset)
 
 	// Setup Temp Files
-	tempDir := os.TempDir()
-	encodedFile, err := os.CreateTemp(tempDir, "video_opt_*.mkv")
+	encodedFile, err := os.CreateTemp(os.TempDir(), "video_opt_*.mkv")
 	if err != nil {
-		log.Printf("Failed to create temp file: %v", err)
+		log.Fatalf("Failed to create temp file: %v", err)
 		return
 	}
 	encodedPath := encodedFile.Name()
@@ -207,13 +200,17 @@ func runLogic(config Config) {
 }
 
 // findTargetFile looks for the largest video file older than 1 month
-func findTargetFile() (string, error) {
+func findTargetFile(ctx context.Context) (string, error) {
 	var largestFile string
 	var largestSize int64
 
 	threshold := time.Now().AddDate(0, -1, 0) // 1 month ago
 
 	err := filepath.Walk(MediaDir, func(path string, info os.FileInfo, err error) error {
+        if ctx.Err() != nil {
+            return
+        }
+
 		if err != nil {
 			return nil // Skip access errors
 		}
@@ -389,8 +386,7 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 
 	log.Println("Remuxing to remove duplicate audio tracks...")
 
-	tempDir := os.TempDir()
-	remuxFile, err := os.CreateTemp(tempDir, "video_remux_*.mkv")
+	remuxFile, err := os.CreateTemp(os.TempDir(), "video_remux_*.mkv")
 	if err != nil {
 		return "", err
 	}
