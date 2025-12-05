@@ -107,14 +107,16 @@ func main() {
 		cancel()
 	}()
 
+	ticker := time.NewTicker(time.Nanosecond)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
+		case <-ticker.C:
 			if err := encodeFile(ctx, cfg); err != nil {
 				log.Println("Error during encoding: ", err)
-				time.Sleep(time.Hour) // if no files encoded sleep
+				ticker.Reset(time.Hour)
 			}
 		}
 	}
