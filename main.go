@@ -112,43 +112,44 @@ func main() {
 		case <-ctx.Done():
 			return
 		default:
-			runLogic(ctx, cfg)
+			if err := encodeFile(ctx, cfg); err != nil {
+				log.Println("Error during encoding: ", err)
+				time.Sleep(time.Hour) // if no files encoded sleep
+			}
 		}
 	}
 }
 
-func runLogic(ctx context.Context, cfg Config) {
+func encodeFile(ctx context.Context, cfg Config) error {
 	log.Println("Scanning for largest eligible video file...")
 
 	targetFile, err := findTargetFile(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
-		log.Printf("Error searching files: %v", err)
-		return
+		return fmt.Errorf("search files: %w", err)
 	}
 
 	if targetFile == "" {
-		log.Println("No matching files found (older than 1 month).")
-		return
+		return fmt.Errorf("no matching files found (older than %v)", time.Since(timeThreshold))
 	}
 
 	log.Printf("Found target candidate: %s", targetFile)
 
 	mkvInfo, err := getMkvInfo(targetFile)
-	if err != nil || ctx.Err() != nil {
-		return
+	if err != nil {
+		return fmt.Errorf("get mkvmerge info: %w", err)
 	}
 
 	if shouldSkipFile(mkvInfo) {
 		log.Println("File already optimized, skipping.")
-		return
+		return nil
 	}
 
 	mediaInfo, err := getMediaInfo(targetFile)
-	if err != nil || ctx.Err() != nil {
-		return
+	if err != nil {
+		return fmt.Errorf("get mediainfo: %w", err)
 	}
 
 	preset := getHandbrakePreset(mediaInfo)
@@ -157,8 +158,7 @@ func runLogic(ctx context.Context, cfg Config) {
 	// Setup Temp Files
 	encodedFile, err := os.CreateTemp(os.TempDir(), "video_opt_*.mkv")
 	if err != nil {
-		log.Fatalf("Failed to create temp file: %v", err)
-		return
+		return fmt.Errorf("create temp file: %w", err)
 	}
 	encodedPath := encodedFile.Name()
 	encodedFile.Close() // Close immediately, Handbrake will write to it
@@ -180,16 +180,14 @@ func runLogic(ctx context.Context, cfg Config) {
 	log.Println("Starting HandBrake conversion...")
 	err = runHandbrake(ctx, cfg, targetFile, encodedPath, preset)
 	if err != nil {
-		log.Printf("HandBrake failed: %v", err)
-		return
+		return fmt.Errorf("run handbrake: %w", err)
 	}
 	log.Println("HandBrake finished successfully.")
 
 	log.Println("Checking audio tracks on converted file...")
 	finalPath, err := processAudioTracks(encodedPath, &filesToDelete)
 	if err != nil {
-		log.Printf("Audio processing failed: %v", err)
-		return
+		return fmt.Errorf("process audio tracks: %w", err)
 	}
 
 	if cfg.PromptMode {
@@ -203,8 +201,7 @@ func runLogic(ctx context.Context, cfg Config) {
 		response = strings.TrimSpace(strings.ToLower(response))
 
 		if response != "y" && response != "yes" {
-			log.Println("User cancelled replacement.")
-			return
+			return nil
 		}
 	}
 
@@ -216,15 +213,13 @@ func runLogic(ctx context.Context, cfg Config) {
 		// Fallback for cross-device link errors
 		err = copyFile(finalPath, targetFile)
 		if err != nil {
-			log.Printf("Failed to replace file: %v", err)
-			return
+			return fmt.Errorf("replace original file: %w", err)
 		}
 	}
 
-	log.Println("Operation completed successfully.")
-	// Remove the temp file from the deletion list if it was successfully moved (if rename was used)
-	// If copy was used, defer handles cleanup.
-	// To be safe, we just let defer clean up the 'finalPath' IF it still exists at that path.
+	log.Println("Encoding completed successfully for:", targetFile)
+
+	return nil
 }
 
 // findTargetFile looks for the largest video file older than 1 month
