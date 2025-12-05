@@ -18,16 +18,33 @@ import (
 	"time"
 )
 
+const (
+	envMedia         = "MEDIA_DIR"
+	envHandbrakeConf = "HANDBRAKE_CONF"
+	envPromptMode    = "PROMPT_MODE"
+
+	defaultMediaDir      = "/media"
+	defaultHandbrakeConf = "/root/.config/ghb/presets.json"
+)
+
+var (
+	timeThreshold       = time.Now().AddDate(0, -1, 0) // 1 month ago
+	processedExtensions = func() map[string]struct{} {
+		exts := []string{"mkv", "mp4", "avi", "mov", "m4v"}
+		ret := make(map[string]struct{}, len(exts))
+		for _, e := range exts {
+			ret["."+e] = struct{}{}
+		}
+		return ret
+	}()
+)
+
 // Config holds command line flags
 type Config struct {
-	PromptMode bool
+	PromptMode           bool
+	MedaiDir             string
+	HandbrakePresetsPath string
 }
-
-// Global configuration
-const (
-	MediaDir      = "/media"
-	HandbrakeConf = "/root/.config/ghb/presets.json"
-)
 
 // Structs for JSON parsing
 type MkvMergeOutput struct {
@@ -56,44 +73,58 @@ type MediaInfoOutput struct {
 func main() {
 	// Parse Flags
 	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
-
+	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
+	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf, "Path to HandBrake presets JSON file")
 	flag.Parse()
 
-	config := Config{PromptMode: *promptPtr}
+	cfg := Config{
+		PromptMode:           *promptPtr,
+		MedaiDir:             *mediaDirPtr,
+		HandbrakePresetsPath: *handbrakeConfPtr,
+	}
+	if os.Getenv(envMedia) != "" {
+		cfg.MedaiDir = os.Getenv(envMedia)
+	}
+	if os.Getenv(envHandbrakeConf) != "" {
+		cfg.HandbrakePresetsPath = os.Getenv(envHandbrakeConf)
+	}
+	if os.Getenv(envPromptMode) != "" && cfg.PromptMode == false {
+		envVal, _ := strconv.ParseBool(os.Getenv(envPromptMode))
+		cfg.PromptMode = envVal
+	}
 
 	log.Println("Starting Video Optimizer Daemon...")
+	log.Println("Configuration: ", cfg)
 
-	// root context
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// handle shutdown signals
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
 		<-sigs
 		log.Println("Shutting down...")
 		cancel()
 	}()
 
-	// initial run
-	runLogic(ctx, config)
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			runLogic(ctx, config)
+			runLogic(ctx, cfg)
 		}
 	}
 }
 
-func runLogic(ctx context.Context, config Config) {
+func runLogic(ctx context.Context, cfg Config) {
 	log.Println("Scanning for largest eligible video file...")
 
-	targetFile, err := findTargetFile(ctx)
+	targetFile, err := findTargetFile(ctx, cfg)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		log.Printf("Error searching files: %v", err)
 		return
 	}
@@ -105,7 +136,7 @@ func runLogic(ctx context.Context, config Config) {
 
 	log.Printf("Found target candidate: %s", targetFile)
 
-	mkvInfo, err := getMkvInfo(ctx, targetFile)
+	mkvInfo, err := getMkvInfo(targetFile)
 	if err != nil || ctx.Err() != nil {
 		return
 	}
@@ -115,7 +146,7 @@ func runLogic(ctx context.Context, config Config) {
 		return
 	}
 
-	mediaInfo, err := getMediaInfo(ctx, targetFile)
+	mediaInfo, err := getMediaInfo(targetFile)
 	if err != nil || ctx.Err() != nil {
 		return
 	}
@@ -133,7 +164,6 @@ func runLogic(ctx context.Context, config Config) {
 	encodedFile.Close() // Close immediately, Handbrake will write to it
 
 	// Defer cleanup of the main encoded file (and potential remux file)
-	// We will track files to delete in a slice
 	var filesToDelete []string
 	filesToDelete = append(filesToDelete, encodedPath)
 
@@ -148,14 +178,13 @@ func runLogic(ctx context.Context, config Config) {
 
 	// Run Handbrake
 	log.Println("Starting HandBrake conversion...")
-	err = runHandbrake(targetFile, encodedPath, preset)
+	err = runHandbrake(ctx, cfg, targetFile, encodedPath, preset)
 	if err != nil {
 		log.Printf("HandBrake failed: %v", err)
 		return
 	}
 	log.Println("HandBrake finished successfully.")
 
-	// Step 4: Check Audio Tracks on Result
 	log.Println("Checking audio tracks on converted file...")
 	finalPath, err := processAudioTracks(encodedPath, &filesToDelete)
 	if err != nil {
@@ -163,8 +192,7 @@ func runLogic(ctx context.Context, config Config) {
 		return
 	}
 
-	// Step 5 & 7: Move or Prompt
-	if config.PromptMode {
+	if cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
 		fmt.Printf("Original: %s\n", targetFile)
 		fmt.Printf("New File: %s\n", finalPath)
@@ -200,28 +228,29 @@ func runLogic(ctx context.Context, config Config) {
 }
 
 // findTargetFile looks for the largest video file older than 1 month
-func findTargetFile(ctx context.Context) (string, error) {
+func findTargetFile(ctx context.Context, cfg Config) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
 	var largestFile string
 	var largestSize int64
+	threshold := timeThreshold
 
-	threshold := time.Now().AddDate(0, -1, 0) // 1 month ago
-
-	err := filepath.Walk(MediaDir, func(path string, info os.FileInfo, err error) error {
-        if ctx.Err() != nil {
-            return
-        }
-
-		if err != nil {
-			return nil // Skip access errors
+	err := filepath.Walk(cfg.MedaiDir, func(path string, info os.FileInfo, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		if info.IsDir() {
+
+		if err != nil || // Skip access errors
+			info.IsDir() {
 			return nil
 		}
 
 		// Filter for video extensions
 		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".mkv" && ext != ".mp4" && ext != ".avi" && ext != ".mov" {
-			return nil
+		if _, ok := processedExtensions[ext]; !ok {
+			return nil // not a video file
 		}
 
 		if info.ModTime().Before(threshold) {
@@ -252,12 +281,13 @@ func getMkvInfo(path string) (*MkvMergeOutput, error) {
 }
 
 func shouldSkipFile(info *MkvMergeOutput) bool {
-	skipCodecs := []string{"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "AV1", "V_AV1", "VVC"}
+	skipCodecs := []string{"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265", "AV1", "V_AV1", "VVC"}
 
 	for _, track := range info.Tracks {
 		if track.Type == "video" {
+			codec := strings.ToUpper(track.Codec)
 			for _, skip := range skipCodecs {
-				if strings.Contains(strings.ToUpper(track.Codec), skip) {
+				if strings.Contains(codec, skip) {
 					return true
 				}
 			}
@@ -305,37 +335,36 @@ func getHandbrakePreset(info *MediaInfoOutput) string {
 	return "slow-1080p-19"
 }
 
-func runHandbrake(input, output, preset string) error {
-	// nice -n 19 HandBrakeCLI ...
-
-	// Ensure directory exists for preset
-	presetFile := HandbrakeConf
-
-	ext := filepath.Ext(input)
-	// Handbrake output usually expects extension. We are writing to the temp file
-	// which has .mkv suffix from os.CreateTemp
-
+// nice -n 19 HandBrakeCLI ...
+func runHandbrake(ctx context.Context, cfg Config, input, output, preset string) error {
 	args := []string{
 		"-n", "19",
 		"HandBrakeCLI",
-		"--preset-import-file", presetFile,
+		"--preset-import-file", cfg.HandbrakePresetsPath,
 		"-Z", preset,
 		"-i", input,
 		"-o", output,
 		"--format", "mkv", // Enforce container
 	}
 
-	// We preserve original extension if possible in filename, but container is mkv
-	if strings.ToLower(ext) == ".mp4" {
-		// If original was mp4, we might want to output mp4, but prompts logic involves mkvmerge later.
-		// mkvmerge works best with mkv. Let's stick to mkv for intermediate.
-	}
-
 	cmd := exec.Command("nice", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr // Handbrake logs progress to stderr
 
-	return cmd.Run()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Run()
+	}()
+
+	select {
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
 }
 
 // processAudioTracks checks for duplicate languages and remuxes if necessary
