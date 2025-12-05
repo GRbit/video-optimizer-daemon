@@ -46,19 +46,6 @@ type Config struct {
 	HandbrakePresetsPath string
 }
 
-// Structs for JSON parsing
-type MkvMergeOutput struct {
-	Tracks []struct {
-		ID         int    `json:"id"`
-		Type       string `json:"type"`
-		Codec      string `json:"codec"`
-		Properties struct {
-			Language        string `json:"language"`
-			PixelDimensions string `json:"pixel_dimensions"`
-		} `json:"properties"`
-	} `json:"tracks"`
-}
-
 type MediaInfoOutput struct {
 	Media struct {
 		Track []struct {
@@ -139,19 +126,14 @@ func encodeFile(ctx context.Context, cfg Config) error {
 
 	log.Printf("Found target candidate: %s", targetFile)
 
-	mkvInfo, err := getMkvInfo(targetFile)
-	if err != nil {
-		return fmt.Errorf("get mkvmerge info: %w", err)
-	}
-
-	if shouldSkipFile(mkvInfo) {
-		log.Println("File already optimized, skipping.")
-		return nil
-	}
-
 	mediaInfo, err := getMediaInfo(targetFile)
 	if err != nil {
 		return fmt.Errorf("get mediainfo: %w", err)
+	}
+
+	if shouldSkipFile(mediaInfo) {
+		log.Println("File already optimized, skipping.")
+		return nil
 	}
 
 	preset := getHandbrakePreset(mediaInfo)
@@ -199,7 +181,27 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		fmt.Print("Replace original file? (y/n): ")
 
 		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
+
+		// non blocking read
+		var (
+			response string
+			errCh    = make(chan error)
+		)
+		go func() {
+			var err error
+			response, err = reader.ReadString('\n')
+			errCh <- err
+		}()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errCh:
+			if err != nil {
+				return fmt.Errorf("reading user input: %w", err)
+			}
+		}
+
 		response = strings.TrimSpace(strings.ToLower(response))
 
 		if response != "y" && response != "yes" {
@@ -262,22 +264,7 @@ func findTargetFile(ctx context.Context, cfg Config) (string, error) {
 	return largestFile, err
 }
 
-func getMkvInfo(path string) (*MkvMergeOutput, error) {
-	// Using -J for JSON output
-	cmd := exec.Command("mkvmerge", "-J", path)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var data MkvMergeOutput
-	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func shouldSkipFile(info *MkvMergeOutput) bool {
+func shouldSkipFile(info *MediaInfoOutput) bool {
 	skipCodecs := []string{"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265", "AV1", "V_AV1", "VVC"}
 
 	for _, track := range info.Tracks {
@@ -329,7 +316,7 @@ func getHandbrakePreset(info *MediaInfoOutput) string {
 	if width > 1920 || height > 1080 {
 		return "slow-2160p-20"
 	}
-	return "slow-1080p-19"
+	return "slower-1080p-19"
 }
 
 // nice -n 19 HandBrakeCLI ...
@@ -367,7 +354,7 @@ func runHandbrake(ctx context.Context, cfg Config, input, output, preset string)
 // processAudioTracks checks for duplicate languages and remuxes if necessary
 // Returns the path to the valid file (either the original encoded one, or a new remuxed one)
 func processAudioTracks(filePath string, filesToDelete *[]string) (string, error) {
-	info, err := getMkvInfo(filePath)
+	info, err := getMediaInfo(filePath)
 	if err != nil {
 		return "", err
 	}
@@ -401,9 +388,7 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 		}
 	}
 
-	// Prompt condition: "If there are more than 2 languages, file is checked with mediainfo"
-	// The prompt logic is slightly ambiguous here. It implies checking complexity if many languages exist.
-	// Since we are deduping regardless, we just proceed with the deduplication logic.
+	// "If there are more than 2 languages, file is checked with mediainfo"
 
 	if !needsRemux {
 		log.Println("Audio tracks are optimal. No remuxing needed.")
