@@ -32,7 +32,7 @@ const (
 var (
 	timeThreshold       = time.Now().AddDate(0, -1, 0) // 1 month ago
 	processedExtensions = func() map[string]struct{} {
-		exts := []string{"mkv", "mp4", "avi", "mov", "m4v"}
+		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
 		ret := make(map[string]struct{}, len(exts))
 		for _, e := range exts {
 			ret["."+e] = struct{}{}
@@ -58,6 +58,7 @@ type MediaInfoOutput struct {
 			Language string `json:"Language"`
 			Width    string `json:"Width"`
 			Height   string `json:"Height"`
+			Bitrate  string `json:"Bitrate"`
 		} `json:"track"`
 	} `json:"media"`
 }
@@ -158,7 +159,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
-	preset := getHandbrakePreset(mediaInfo)
+	preset := pickHandbrakePreset(mediaInfo)
 	log.Printf("Selected Preset: %s", preset)
 
 	// Setup Temp Files
@@ -168,6 +169,8 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	}
 	encodedPath := encodedFile.Name()
 	encodedFile.Close() // Close immediately, Handbrake will write to it
+
+	log.Println("temp file created:", encodedPath)
 
 	// Defer cleanup of the main encoded file (and potential remux file)
 	var filesToDelete []string
@@ -245,14 +248,17 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		// Fallback for cross-device link errors
 		err = copyFile(finalPath, newFilePath)
 		if err != nil {
-			return fmt.Errorf("replace original file: %w", err)
+			return fmt.Errorf("Replace original file: %w", err)
+		} else {
+			log.Println("File copied successfully.")
 		}
+	} else {
+		log.Println("File renamed successfully.")
 	}
 
-	// Remove original file
 	err = os.Remove(targetFile)
 	if err != nil {
-		return fmt.Errorf("remove original file: %w", err)
+		return fmt.Errorf("Remove original file: %w", err)
 	}
 
 	log.Println("Encoding completed successfully for:", targetFile)
@@ -338,7 +344,7 @@ func shouldSkipFile(info *MediaInfoOutput) bool {
 	skipCodecs := []string{"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265", "AV1", "V_AV1", "VVC"}
 
 	for _, track := range info.Media.Tracks {
-		if track.Type == "video" {
+		if strings.EqualFold(track.Type, "video") {
 			codec := strings.ToUpper(track.CodecID)
 			for _, skip := range skipCodecs {
 				if strings.Contains(codec, skip) {
@@ -380,28 +386,69 @@ func getMkvInfo(path string) (*MkvMergeOutput, error) {
 	return &data, nil
 }
 
-func getHandbrakePreset(info *MediaInfoOutput) string {
+func pickHandbrakePreset(info *MediaInfoOutput) string {
 	width := 0
 	height := 0
+	bitrate := 0
 
 	// Parse dimensions from MediaInfo
 	for _, track := range info.Media.Tracks {
-		if track.Type == "Video" {
-			w, _ := strconv.Atoi(track.Width)
-			h, _ := strconv.Atoi(track.Height)
-			if w > width {
-				width = w
-			}
-			if h > height {
-				height = h
-			}
+		if strings.EqualFold(track.Type, "video") {
+			width, _ = strconv.Atoi(track.Width)
+			height, _ = strconv.Atoi(track.Height)
+			bitrate, _ = strconv.Atoi(track.Bitrate)
 		}
 	}
 
+	// default quality
+	mode := "slow"
+	resolution := "1080p"
+	q := 20
+
 	if width > 1920 || height > 1080 {
-		return "slow-2160p-20"
+		resolution = "2160p"
+		q++
 	}
-	return "slower-1080p-19"
+	if width < 1280 && height < 720 {
+		q--
+		if width < 854 && height < 480 {
+			q--
+			if width < 640 && height < 360 {
+				q--
+			}
+		}
+	}
+	if bitrate > 500000 {
+		q--
+		if bitrate > 1000000 {
+			q--
+			if bitrate > 2000000 {
+				q--
+			}
+		}
+	}
+	if bitrate < 100000 {
+		q++
+	}
+
+	switch resolution {
+	case "2160p":
+		q = clamp(q, 17, 21)
+	case "1080p":
+		q = clamp(q, 14, 21)
+	}
+
+	return strings.Join([]string{mode, resolution, strconv.Itoa(q)}, "-")
+}
+
+func clamp(val, min, max int) int {
+	if val < min {
+		return min
+	}
+	if val > max {
+		return max
+	}
+	return val
 }
 
 // nice -n 19 HandBrakeCLI ...
@@ -415,6 +462,8 @@ func runHandbrake(ctx context.Context, cfg Config, input, output, preset string)
 		"-o", output,
 		"--format", "mkv", // Enforce container
 	}
+
+	log.Println("gonna run command: nice", args)
 
 	cmd := exec.Command("nice", args...)
 	cmd.Stdout = os.Stdout
@@ -451,7 +500,7 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 	audioCount := 0
 
 	for _, track := range info.Tracks {
-		if track.Type == "audio" {
+		if strings.EqualFold(track.Type, "audio") {
 			audioCount++
 			lang := track.Properties.Language
 			// If language is missing, treat as 'und'
