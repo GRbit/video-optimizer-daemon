@@ -126,6 +126,7 @@ func main() {
 		case <-ticker.C:
 			if err := encodeFile(ctx, cfg); err != nil {
 				log.Println("Error during encoding: ", err)
+				os.Exit(1)
 				ticker.Reset(time.Hour)
 			}
 		}
@@ -463,7 +464,7 @@ func runHandbrake(ctx context.Context, cfg Config, input, output, preset string)
 		"--format", "mkv", // Enforce container
 	}
 
-	log.Println("gonna run command: nice", args)
+	log.Println("Running HandbrakeCLI command: nice", args)
 
 	cmd := exec.Command("nice", args...)
 	cmd.Stdout = os.Stdout
@@ -552,9 +553,11 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 
 	args := []string{
 		"-o", remuxPath,
-		"--tracks", strings.Join(keepTrackIDs, ","),
+		"--audio-tracks", strings.Join(keepTrackIDs, ","),
 		filePath,
 	}
+
+	log.Println("Running mkvmerge with args: mkvmerge", args)
 
 	cmd := exec.Command("mkvmerge", args...)
 	output, err := cmd.CombinedOutput()
