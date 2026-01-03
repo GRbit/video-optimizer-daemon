@@ -30,6 +30,7 @@ const (
 )
 
 var (
+	subsExtensions      = []string{".srt", ".ass", ".vtt", ".sub", ".ssa", ".idx", ".txt", ".txt"}
 	timeThreshold       = time.Now().AddDate(0, -1, 0) // 1 month ago
 	processedExtensions = func() map[string]struct{} {
 		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
@@ -235,6 +236,16 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	if err := replaceEncodedFile(targetFile, finalPath); err != nil {
+		return fmt.Errorf("replace encoded file: %w", err)
+	}
+
+	log.Println("Encoding completed successfully for:", targetFile)
+
+	return nil
+}
+
+func replaceEncodedFile(targetFile, finalPath string) error {
 	// replace .ext with .x265.mkv
 	newFilePath := strings.TrimSuffix(targetFile, filepath.Ext(targetFile)) + ".x265.mkv"
 
@@ -243,7 +254,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	// New encoded file should be named as the original, but with .x265.mkv extension
 	// After we move temp to this name, we can remove the original
 
-	err = os.Rename(finalPath, newFilePath)
+	err := os.Rename(finalPath, newFilePath)
 	if err != nil {
 		log.Println("Rename failed, attempting copy and delete:", err)
 		// Fallback for cross-device link errors
@@ -262,7 +273,22 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("Remove original file: %w", err)
 	}
 
-	log.Println("Encoding completed successfully for:", targetFile)
+	log.Println("Original file removed successfully (", targetFile, ")")
+
+	// rename subtitle files if needed
+	origBase := strings.TrimSuffix(targetFile, filepath.Ext(targetFile))
+	for _, subExt := range subsExtensions {
+		origSubPath := origBase + subExt
+		if _, err := os.Stat(origSubPath); err == nil {
+			newSubPath := strings.TrimSuffix(newFilePath, filepath.Ext(newFilePath)) + subExt
+			err = os.Rename(origSubPath, newSubPath)
+			if err != nil {
+				log.Printf("Failed to rename subtitle file %s: %v", origSubPath, err)
+			} else {
+				log.Printf("Renamed subtitle file %s to %s", origSubPath, newSubPath)
+			}
+		}
+	}
 
 	return nil
 }
@@ -281,6 +307,8 @@ func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
 		return "", fmt.Errorf("open media list: %w", err)
 	}
 	defer file.Close()
+
+	log.Println("Reading media list from:", cfg.MediaListPath)
 
 	// read first line, check if file exists and is valid, return the found file
 	scanner := bufio.NewScanner(file)
@@ -423,9 +451,6 @@ func pickHandbrakePreset(info *MediaInfoOutput) string {
 		q--
 		if bitrate > 1000000 {
 			q--
-			if bitrate > 2000000 {
-				q--
-			}
 		}
 	}
 	if bitrate < 100000 {
