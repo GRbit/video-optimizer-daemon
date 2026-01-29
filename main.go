@@ -19,13 +19,12 @@ import (
 )
 
 const (
-	envMedia         = "MEDIA_DIR"
+	envMediaDir      = "MEDIA_DIR"
 	envHandbrakeConf = "HANDBRAKE_CONF"
 	envPromptMode    = "PROMPT_MODE"
 	envMediaList     = "MEDIA_LIST_PATH"
 
 	defaultMediaDir      = "/media"
-	defaultMediaListPath = "/media/to_encode.txt"
 	defaultHandbrakeConf = "/root/.config/ghb/presets.json"
 )
 
@@ -40,6 +39,7 @@ var (
 		}
 		return ret
 	}()
+	optimizedFiles = make(map[string]struct{})
 )
 
 // Config holds command line flags
@@ -81,7 +81,7 @@ func main() {
 	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
 	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf, "Path to HandBrake presets JSON file")
-	mediaListPtr := flag.String("media-list", defaultMediaListPath, "Path to media list file (not used currently)")
+	mediaListPtr := flag.String("media-list", "", "Path to media list file (not used currently)")
 	flag.Parse()
 
 	cfg := Config{
@@ -90,8 +90,8 @@ func main() {
 		MediaListPath:        *mediaListPtr,
 		HandbrakePresetsPath: *handbrakeConfPtr,
 	}
-	if os.Getenv(envMedia) != "" {
-		cfg.MediaDir = os.Getenv(envMedia)
+	if os.Getenv(envMediaDir) != "" {
+		cfg.MediaDir = os.Getenv(envMediaDir)
 	}
 	if os.Getenv(envHandbrakeConf) != "" {
 		cfg.HandbrakePresetsPath = os.Getenv(envHandbrakeConf)
@@ -135,8 +135,6 @@ func main() {
 }
 
 func encodeFile(ctx context.Context, cfg Config) error {
-	log.Println("Scanning for largest eligible video file...")
-
 	targetFile, err := findTargetFile(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -156,13 +154,60 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("get mediainfo: %w", err)
 	}
 
+	// print vide track bitrate
+	for _, track := range mediaInfo.Media.Tracks {
+		if strings.EqualFold(track.Type, "video") {
+			bitrate := formatStr(track.Bitrate)
+			log.Printf("Video Format: %s, CodecID: %s, Bitrate: %s bps", track.Format, track.CodecID, bitrate)
+			break
+		}
+	}
+
+	log.Printf("File Size: %s", getFileSize(targetFile))
+
 	if shouldSkipFile(mediaInfo) {
 		log.Println("File already optimized, skipping.")
+		optimizedFiles[targetFile] = struct{}{}
 		return nil
 	}
 
 	preset := pickHandbrakePreset(mediaInfo)
 	log.Printf("Selected Preset: %s", preset)
+
+	if cfg.PromptMode {
+		fmt.Printf("\n--- ACTION REQUIRED ---\n")
+		fmt.Printf("File to convert: %s\n", targetFile)
+		fmt.Print("Start convertation? (y/n): ")
+
+		reader := bufio.NewReader(os.Stdin)
+
+		// non blocking read
+		var (
+			response string
+			errCh    = make(chan error)
+		)
+		go func() {
+			var err error
+			response, err = reader.ReadString('\n')
+			errCh <- err
+		}()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errCh:
+			if err != nil {
+				return fmt.Errorf("reading user input: %w", err)
+			}
+		}
+
+		response = strings.TrimSpace(strings.ToLower(response))
+
+		if response != "y" && response != "yes" {
+			log.Printf("Convertation was declined")
+			return nil
+		}
+	}
 
 	// Setup Temp Files
 	encodedFile, err := os.CreateTemp(os.TempDir(), "video_opt_*.mkv")
@@ -204,7 +249,9 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	if cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
 		fmt.Printf("Original: %s\n", targetFile)
+		fmt.Printf("Original size: %s\n", getFileSize(targetFile))
 		fmt.Printf("New File: %s\n", finalPath)
+		fmt.Printf("New size: %s\n", getFileSize(finalPath))
 		fmt.Print("Replace original file? (y/n): ")
 
 		reader := bufio.NewReader(os.Stdin)
@@ -232,6 +279,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		response = strings.TrimSpace(strings.ToLower(response))
 
 		if response != "y" && response != "yes" {
+			log.Printf("File replacement cancelled")
 			return nil
 		}
 	}
@@ -322,6 +370,18 @@ func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
 			continue
 		}
 
+		mediaInfo, err := getMediaInfo(path)
+		if err != nil {
+			return "", fmt.Errorf("get mediainfo '%s': %w", path, err)
+		}
+
+		if shouldSkipFile(mediaInfo) {
+			continue
+		}
+
+		log.Println("Found valid file in media list: ", path)
+		log.Println("Info:", info)
+
 		return path, nil
 	}
 
@@ -337,6 +397,8 @@ func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
 		return "", ctx.Err()
 	}
 
+	log.Println("Scanning for largest eligible video file...")
+
 	var largestFile string
 	var largestSize int64
 	threshold := timeThreshold
@@ -349,6 +411,10 @@ func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
 		if err != nil || // Skip access errors
 			info.IsDir() {
 			return nil
+		}
+
+		if _, ok := optimizedFiles[path]; ok {
+			return nil // already optimized
 		}
 
 		// Filter for video extensions
@@ -447,13 +513,13 @@ func pickHandbrakePreset(info *MediaInfoOutput) string {
 			}
 		}
 	}
-	if bitrate > 500000 {
+	if bitrate > 7_000_000 {
 		q--
-		if bitrate > 1000000 {
+		if bitrate > 15_000_000 {
 			q--
 		}
 	}
-	if bitrate < 100000 {
+	if bitrate < 1_500_000 {
 		q++
 	}
 
@@ -614,4 +680,42 @@ func copyFile(src, dst string) error {
 	}
 
 	return out.Close()
+}
+
+// formatNum formats an integer with comma separators (e.g. 1234567 -> "1,234,567")
+func formatNum[T int | int64](n T) string {
+	return formatStr(strconv.Itoa(int(n)))
+}
+
+// Format bitrate nicely (e.g. 1,234,567 bps) by 3 digits from end
+func formatStr(s string) string {
+	n := len(s)
+	if n <= 3 {
+		return s
+	}
+
+	var b strings.Builder
+	pre := n % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if n > pre {
+			b.WriteString(",")
+		}
+	}
+	for i := pre; i < n; i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < n {
+			b.WriteString(",")
+		}
+	}
+	return b.String()
+}
+
+func getFileSize(p string) string {
+	info, err := os.Stat(p)
+	if err != nil {
+		log.Println("Error getting file size:", err)
+		return "N/A"
+	}
+	return formatNum(info.Size())
 }
