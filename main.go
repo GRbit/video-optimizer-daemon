@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -29,7 +30,6 @@ const (
 )
 
 var (
-	subsExtensions      = []string{".srt", ".ass", ".vtt", ".sub", ".ssa", ".idx", ".txt", ".txt"}
 	timeThreshold       = time.Now().AddDate(0, -1, 0) // 1 month ago
 	processedExtensions = func() map[string]struct{} {
 		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
@@ -304,6 +304,9 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 		newFilePath = strings.TrimSuffix(targetFile, filepath.Ext(targetFile)) + ".x265.mkv"
 	}
 
+	newFilePath = replaceCasePreserving(newFilePath, "flac", "ogg")
+	newFilePath = replaceCasePreserving(newFilePath, "aac", "ogg")
+
 	log.Printf("Replacing %s with optimized version with name %s", targetFile, newFilePath)
 
 	// New encoded file should be named as the original, but with .x265.mkv extension
@@ -330,22 +333,60 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 
 	log.Println("Original file removed successfully (", targetFile, ")")
 
-	// rename subtitle files if needed
-	origBase := strings.TrimSuffix(targetFile, filepath.Ext(targetFile))
-	for _, subExt := range subsExtensions {
-		origSubPath := origBase + subExt
-		if _, err := os.Stat(origSubPath); err == nil {
-			newSubPath := strings.TrimSuffix(newFilePath, filepath.Ext(newFilePath)) + subExt
-			err = os.Rename(origSubPath, newSubPath)
-			if err != nil {
-				log.Printf("Failed to rename subtitle file %s: %v", origSubPath, err)
-			} else {
-				log.Printf("Renamed subtitle file %s to %s", origSubPath, newSubPath)
-			}
+	// Rename all sibling files that share the same base name (excluding extension)
+	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
+	newBase := strings.TrimSuffix(filepath.Base(newFilePath), filepath.Ext(newFilePath))
+	dir := filepath.Dir(targetFile)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read directory for sibling rename: %w", err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		// Match files whose name starts with origBase followed by a dot,
+		// but skip the already-handled target and destination files.
+		if !strings.HasPrefix(name, origBase+".") {
+			continue
+		}
+		oldPath := filepath.Join(dir, name)
+		if oldPath == targetFile || oldPath == newFilePath {
+			continue
+		}
+		// Preserve everything after the origBase prefix (e.g. ".en.ass", ".srt", ".mka")
+		suffix := name[len(origBase):]
+		newPath := filepath.Join(dir, newBase+suffix)
+		if err := os.Rename(oldPath, newPath); err != nil {
+			log.Printf("Failed to rename sibling file %s: %v", oldPath, err)
+		} else {
+			log.Printf("Renamed sibling file %s to %s", oldPath, newPath)
 		}
 	}
 
 	return nil
+}
+
+func replaceCasePreserving(s, old, new string) string {
+	lowerS := strings.ToLower(s)
+	lowerOld := strings.ToLower(old)
+	idx := strings.Index(lowerS, lowerOld)
+	if idx == -1 {
+		return s
+	}
+	matched := s[idx : idx+len(old)]
+	// Build replacement with case mirrored from matched onto new
+	result := []rune(new)
+	for i, ch := range result {
+		if i < len(matched) {
+			if unicode.IsUpper(rune(matched[i])) {
+				result[i] = unicode.ToUpper(ch)
+			} else {
+				result[i] = unicode.ToLower(ch)
+			}
+		}
+	}
+	return s[:idx] + string(result) + s[idx+len(old):]
 }
 
 // findTargetFile looks for the largest video file older than 1 month
