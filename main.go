@@ -158,7 +158,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	for _, track := range mediaInfo.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
 			bitrate := formatStr(track.Bitrate)
-			log.Printf("Video Format: %s, CodecID: %s, Bitrate: %s bps", track.Format, track.CodecID, bitrate)
+			log.Printf("Format: %s, CodecID: %s, %sx%sp %s bps", track.Format, track.CodecID, track.Width, track.Height, bitrate)
 			break
 		}
 	}
@@ -205,6 +205,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 
 		if response != "y" && response != "yes" {
 			log.Printf("Convertation was declined")
+			optimizedFiles[targetFile] = struct{}{}
 			return nil
 		}
 	}
@@ -295,7 +296,13 @@ func encodeFile(ctx context.Context, cfg Config) error {
 
 func replaceEncodedFile(targetFile, finalPath string) error {
 	// replace .ext with .x265.mkv
-	newFilePath := strings.TrimSuffix(targetFile, filepath.Ext(targetFile)) + ".x265.mkv"
+	// or replace 264 in name with 265
+	var newFilePath string
+	if strings.Contains(strings.ToLower(targetFile), "264") {
+		newFilePath = strings.ReplaceAll(targetFile, "264", "265")
+	} else {
+		newFilePath = strings.TrimSuffix(targetFile, filepath.Ext(targetFile)) + ".x265.mkv"
+	}
 
 	log.Printf("Replacing %s with optimized version with name %s", targetFile, newFilePath)
 
@@ -436,7 +443,12 @@ func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
 }
 
 func shouldSkipFile(info *MediaInfoOutput) bool {
-	skipCodecs := []string{"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265", "AV1", "V_AV1", "VVC"}
+	skipCodecs := []string{
+		"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265",
+		"AV1", "V_AV1", "VVC",
+		"DVHE", "V_DVHE", "DVH1", "V_DVH1",
+		"HVC1", "HVC2",
+	}
 
 	for _, track := range info.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
@@ -446,8 +458,12 @@ func shouldSkipFile(info *MediaInfoOutput) bool {
 					return true
 				}
 			}
+			if strings.EqualFold(track.Format, "HEVC") {
+				return true
+			}
 		}
 	}
+
 	return false
 }
 
@@ -502,7 +518,9 @@ func pickHandbrakePreset(info *MediaInfoOutput) string {
 
 	if width > 1920 || height > 1080 {
 		resolution = "2160p"
-		q++
+		if width >= 2100 || height >= 1200 {
+			q++
+		}
 	}
 	if width < 1280 && height < 720 {
 		q--
@@ -513,14 +531,17 @@ func pickHandbrakePreset(info *MediaInfoOutput) string {
 			}
 		}
 	}
-	if bitrate > 7_000_000 {
-		q--
-		if bitrate > 15_000_000 {
+
+	if bitrate != 0 {
+		if bitrate > 5_000_000 {
 			q--
+			if bitrate > 12_000_000 {
+				q--
+			}
 		}
-	}
-	if bitrate < 1_500_000 {
-		q++
+		if bitrate < 1_500_000 {
+			q++
+		}
 	}
 
 	switch resolution {
