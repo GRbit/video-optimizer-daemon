@@ -40,6 +40,7 @@ var (
 		return ret
 	}()
 	optimizedFiles = make(map[string]struct{})
+	tmpDir         string
 )
 
 // Config holds command line flags
@@ -82,7 +83,10 @@ func main() {
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
 	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf, "Path to HandBrake presets JSON file")
 	mediaListPtr := flag.String("media-list", "", "Path to media list file (not used currently)")
+	tmpDirPtr := flag.String("tmp", os.TempDir(), "Directory to use for temporary files")
 	flag.Parse()
+
+	tmpDir = *tmpDirPtr
 
 	cfg := Config{
 		PromptMode:           *promptPtr,
@@ -211,7 +215,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	}
 
 	// Setup Temp Files
-	encodedFile, err := os.CreateTemp(os.TempDir(), "video_opt_*.mkv")
+	encodedFile, err := os.CreateTemp(tmpDir, "video_opt_*.mkv")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -285,6 +289,11 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	finalPath, err = mergeSubtitlesAndSound(ctx, targetFile, finalPath, &filesToDelete)
+	if err != nil {
+		return fmt.Errorf("merge subtitles and sound: %w", err)
+	}
+
 	if err := replaceEncodedFile(targetFile, finalPath); err != nil {
 		return fmt.Errorf("replace encoded file: %w", err)
 	}
@@ -292,6 +301,72 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	log.Println("Encoding completed successfully for:", targetFile)
 
 	return nil
+}
+
+// mergeSubtitlesAndSound looks for sidecar files matching the original file's base name
+// with extensions .ass, .srt, or .mka and merges them into the encoded MKV container
+// using mkvmerge. Returns the path of the merged file, or finalPath unchanged if no
+// sidecars are found.
+func mergeSubtitlesAndSound(ctx context.Context, targetFile, finalPath string, filesToDelete *[]string) (string, error) {
+	dir := filepath.Dir(targetFile)
+	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
+
+	sidecarExts := map[string]bool{
+		".ass": true,
+		".srt": true,
+		".mka": true,
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return finalPath, fmt.Errorf("read directory for sidecar files: %w", err)
+	}
+
+	var sidecarFiles []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, origBase) {
+			continue
+		}
+		if !sidecarExts[strings.ToLower(filepath.Ext(name))] {
+			continue
+		}
+		sidecarFiles = append(sidecarFiles, filepath.Join(dir, name))
+	}
+
+	if len(sidecarFiles) == 0 {
+		log.Println("No sidecar subtitle/audio files found, skipping merge.")
+		return finalPath, nil
+	}
+
+	log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecarFiles), sidecarFiles)
+
+	mergedFile, err := os.CreateTemp(tmpDir, "video_merged_*.mkv")
+	if err != nil {
+		return finalPath, fmt.Errorf("create temp file for sidecar merge: %w", err)
+	}
+	mergedPath := mergedFile.Name()
+	mergedFile.Close()
+
+	*filesToDelete = append(*filesToDelete, mergedPath)
+
+	// mkvmerge -o merged.mkv encoded.mkv sidecar1.ass sidecar2.mka ...
+	args := []string{"-o", mergedPath, finalPath}
+	for _, sf := range sidecarFiles {
+		args = append(args, sf)
+	}
+
+	log.Println("Running mkvmerge to merge sidecars: mkvmerge", args)
+
+	cmd := exec.CommandContext(ctx, "mkvmerge", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("mkvmerge merge output: %s", string(out))
+		return finalPath, fmt.Errorf("mkvmerge sidecar merge: %w", err)
+	}
+
+	log.Println("Sidecar merge successful.")
+	return mergedPath, nil
 }
 
 func replaceEncodedFile(targetFile, finalPath string) error {
@@ -345,9 +420,9 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		// Match files whose name starts with origBase followed by a dot,
+		// Match files whose name starts with origBase,
 		// but skip the already-handled target and destination files.
-		if !strings.HasPrefix(name, origBase+".") {
+		if !strings.HasPrefix(name, origBase) {
 			continue
 		}
 		oldPath := filepath.Join(dir, name)
@@ -685,7 +760,7 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 
 	log.Println("Remuxing to remove duplicate audio tracks...")
 
-	remuxFile, err := os.CreateTemp(os.TempDir(), "video_remux_*.mkv")
+	remuxFile, err := os.CreateTemp(tmpDir, "video_remux_*.mkv")
 	if err != nil {
 		return "", err
 	}
