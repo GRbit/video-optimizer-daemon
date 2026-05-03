@@ -30,8 +30,8 @@ const (
 )
 
 var (
-	timeThreshold       = time.Now().AddDate(0, -1, 0) // 1 month ago
-	processedExtensions = func() map[string]struct{} {
+	oldestAllowedModTime = time.Now().AddDate(0, -1, 0) // 1 month ago
+	validVideoExtensions = func() map[string]struct{} {
 		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
 		ret := make(map[string]struct{}, len(exts))
 		for _, e := range exts {
@@ -39,11 +39,10 @@ var (
 		}
 		return ret
 	}()
-	optimizedFiles = make(map[string]struct{})
-	tmpDir         string
+	alreadyProcessedFiles = make(map[string]struct{})
+	tempDirectory         string
 )
 
-// Config holds command line flags
 type Config struct {
 	PromptMode           bool
 	MediaDir             string
@@ -78,7 +77,6 @@ type MkvMergeOutput struct {
 }
 
 func main() {
-	// Parse Flags
 	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
 	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf, "Path to HandBrake presets JSON file")
@@ -86,7 +84,7 @@ func main() {
 	tmpDirPtr := flag.String("tmp", os.TempDir(), "Directory to use for temporary files")
 	flag.Parse()
 
-	tmpDir = *tmpDirPtr
+	tempDirectory = *tmpDirPtr
 
 	cfg := Config{
 		PromptMode:           *promptPtr,
@@ -113,7 +111,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// handle shutdown signals
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -129,7 +126,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := encodeFile(ctx, cfg); err != nil {
+			if err := processVideoFile(ctx, cfg); err != nil {
 				log.Println("Error during encoding: ", err)
 				os.Exit(1)
 				ticker.Reset(time.Hour)
@@ -138,8 +135,8 @@ func main() {
 	}
 }
 
-func encodeFile(ctx context.Context, cfg Config) error {
-	targetFile, err := findTargetFile(ctx, cfg)
+func processVideoFile(ctx context.Context, cfg Config) error {
+	targetFile, err := findTargetVideoFile(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -148,7 +145,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	}
 
 	if targetFile == "" {
-		return fmt.Errorf("no matching files found (older than %v)", time.Since(timeThreshold))
+		return fmt.Errorf("no matching files found (older than %v)", time.Since(oldestAllowedModTime))
 	}
 
 	log.Printf("Found target candidate: %s", targetFile)
@@ -158,7 +155,6 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("get mediainfo: %w", err)
 	}
 
-	// print vide track bitrate
 	for _, track := range mediaInfo.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
 			bitrate := formatStr(track.Bitrate)
@@ -169,23 +165,22 @@ func encodeFile(ctx context.Context, cfg Config) error {
 
 	log.Printf("File Size: %s", getFileSize(targetFile))
 
-	if shouldSkipFile(mediaInfo) {
+	if isAlreadyOptimized(mediaInfo) {
 		log.Println("File already optimized, skipping.")
-		optimizedFiles[targetFile] = struct{}{}
+		alreadyProcessedFiles[targetFile] = struct{}{}
 		return nil
 	}
 
-	preset := pickHandbrakePreset(mediaInfo)
+	preset := selectHandbrakePreset(mediaInfo)
 	log.Printf("Selected Preset: %s", preset)
 
 	if cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
 		fmt.Printf("File to convert: %s\n", targetFile)
-		fmt.Print("Start convertation? (y/n): ")
+		fmt.Print("Start conversion? (y/n): ")
 
 		reader := bufio.NewReader(os.Stdin)
 
-		// non blocking read
 		var (
 			response string
 			errCh    = make(chan error)
@@ -208,28 +203,25 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		response = strings.TrimSpace(strings.ToLower(response))
 
 		if response != "y" && response != "yes" {
-			log.Printf("Convertation was declined")
-			optimizedFiles[targetFile] = struct{}{}
+			log.Printf("Conversion was declined")
+			alreadyProcessedFiles[targetFile] = struct{}{}
 			return nil
 		}
 	}
 
-	// Setup Temp Files
-	encodedFile, err := os.CreateTemp(tmpDir, "video_opt_*.mkv")
+	encodedFile, err := os.CreateTemp(tempDirectory, "video_opt_*.mkv")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	encodedPath := encodedFile.Name()
-	encodedFile.Close() // Close immediately, Handbrake will write to it
+	tempFilePath := encodedFile.Name()
+	encodedFile.Close()
 
-	log.Println("temp file created:", encodedPath)
+	log.Println("temp file created:", tempFilePath)
 
-	// Defer cleanup of the main encoded file (and potential remux file)
-	var filesToDelete []string
-	filesToDelete = append(filesToDelete, encodedPath)
+	tempFiles := []string{tempFilePath}
 
 	defer func() {
-		for _, f := range filesToDelete {
+		for _, f := range tempFiles {
 			if _, err := os.Stat(f); err == nil {
 				log.Printf("Cleaning up temp file: %s", f)
 				os.Remove(f)
@@ -237,16 +229,15 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	// Run Handbrake
 	log.Println("Starting HandBrake conversion...")
-	err = runHandbrake(ctx, cfg, targetFile, encodedPath, preset)
+	err = runHandbrakeCLI(ctx, cfg, targetFile, tempFilePath, preset)
 	if err != nil {
 		return fmt.Errorf("run handbrake: %w", err)
 	}
 	log.Println("HandBrake finished successfully.")
 
 	log.Println("Checking audio tracks on converted file...")
-	finalPath, err := processAudioTracks(encodedPath, &filesToDelete)
+	finalPath, err := deduplicateAudioTracks(tempFilePath, &tempFiles)
 	if err != nil {
 		return fmt.Errorf("process audio tracks: %w", err)
 	}
@@ -261,7 +252,6 @@ func encodeFile(ctx context.Context, cfg Config) error {
 
 		reader := bufio.NewReader(os.Stdin)
 
-		// non blocking read
 		var (
 			response string
 			errCh    = make(chan error)
@@ -289,12 +279,12 @@ func encodeFile(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	finalPath, err = mergeSubtitlesAndSound(ctx, targetFile, finalPath, &filesToDelete)
+	finalPath, err = mergeSidecarFiles(ctx, targetFile, finalPath, &tempFiles)
 	if err != nil {
 		return fmt.Errorf("merge subtitles and sound: %w", err)
 	}
 
-	if err := replaceEncodedFile(targetFile, finalPath); err != nil {
+	if err := replaceOriginalWithEncoded(targetFile, finalPath); err != nil {
 		return fmt.Errorf("replace encoded file: %w", err)
 	}
 
@@ -303,11 +293,7 @@ func encodeFile(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// mergeSubtitlesAndSound looks for sidecar files matching the original file's base name
-// with extensions .ass, .srt, or .mka and merges them into the encoded MKV container
-// using mkvmerge. Returns the path of the merged file, or finalPath unchanged if no
-// sidecars are found.
-func mergeSubtitlesAndSound(ctx context.Context, targetFile, finalPath string, filesToDelete *[]string) (string, error) {
+func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFiles *[]string) (string, error) {
 	dir := filepath.Dir(targetFile)
 	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
 
@@ -341,16 +327,15 @@ func mergeSubtitlesAndSound(ctx context.Context, targetFile, finalPath string, f
 
 	log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecarFiles), sidecarFiles)
 
-	mergedFile, err := os.CreateTemp(tmpDir, "video_merged_*.mkv")
+	mergedFile, err := os.CreateTemp(tempDirectory, "video_merged_*.mkv")
 	if err != nil {
 		return finalPath, fmt.Errorf("create temp file for sidecar merge: %w", err)
 	}
 	mergedPath := mergedFile.Name()
 	mergedFile.Close()
 
-	*filesToDelete = append(*filesToDelete, mergedPath)
+	*tempFiles = append(*tempFiles, mergedPath)
 
-	// mkvmerge -o merged.mkv encoded.mkv sidecar1.ass sidecar2.mka ...
 	args := []string{"-o", mergedPath, finalPath}
 	for _, sf := range sidecarFiles {
 		args = append(args, sf)
@@ -369,9 +354,7 @@ func mergeSubtitlesAndSound(ctx context.Context, targetFile, finalPath string, f
 	return mergedPath, nil
 }
 
-func replaceEncodedFile(targetFile, finalPath string) error {
-	// replace .ext with .x265.mkv
-	// or replace 264 in name with 265
+func replaceOriginalWithEncoded(targetFile, finalPath string) error {
 	var newFilePath string
 	if strings.Contains(strings.ToLower(targetFile), "264") {
 		newFilePath = strings.ReplaceAll(targetFile, "264", "265")
@@ -384,19 +367,14 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 
 	log.Printf("Replacing %s with optimized version with name %s", targetFile, newFilePath)
 
-	// New encoded file should be named as the original, but with .x265.mkv extension
-	// After we move temp to this name, we can remove the original
-
 	err := os.Rename(finalPath, newFilePath)
 	if err != nil {
 		log.Println("Rename failed, attempting copy and delete:", err)
-		// Fallback for cross-device link errors
 		err = copyFile(finalPath, newFilePath)
 		if err != nil {
 			return fmt.Errorf("Replace original file: %w", err)
-		} else {
-			log.Println("File copied successfully.")
 		}
+		log.Println("File copied successfully.")
 	} else {
 		log.Println("File renamed successfully.")
 	}
@@ -408,7 +386,6 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 
 	log.Println("Original file removed successfully (", targetFile, ")")
 
-	// Rename all sibling files that share the same base name (excluding extension)
 	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
 	newBase := strings.TrimSuffix(filepath.Base(newFilePath), filepath.Ext(newFilePath))
 	dir := filepath.Dir(targetFile)
@@ -420,8 +397,6 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		// Match files whose name starts with origBase,
-		// but skip the already-handled target and destination files.
 		if !strings.HasPrefix(name, origBase) {
 			continue
 		}
@@ -429,7 +404,6 @@ func replaceEncodedFile(targetFile, finalPath string) error {
 		if oldPath == targetFile || oldPath == newFilePath {
 			continue
 		}
-		// Preserve everything after the origBase prefix (e.g. ".en.ass", ".srt", ".mka")
 		suffix := name[len(origBase):]
 		newPath := filepath.Join(dir, newBase+suffix)
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -450,7 +424,6 @@ func replaceCasePreserving(s, old, new string) string {
 		return s
 	}
 	matched := s[idx : idx+len(old)]
-	// Build replacement with case mirrored from matched onto new
 	result := []rune(new)
 	for i, ch := range result {
 		if i < len(matched) {
@@ -464,15 +437,14 @@ func replaceCasePreserving(s, old, new string) string {
 	return s[:idx] + string(result) + s[idx+len(old):]
 }
 
-// findTargetFile looks for the largest video file older than 1 month
-func findTargetFile(ctx context.Context, cfg Config) (string, error) {
+func findTargetVideoFile(ctx context.Context, cfg Config) (string, error) {
 	if cfg.MediaListPath != "" {
-		return findTargetFileList(ctx, cfg)
+		return findVideoFromList(ctx, cfg)
 	}
-	return findTargetFileWalk(ctx, cfg)
+	return findVideoFromDirectory(ctx, cfg)
 }
 
-func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
+func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
 	file, err := os.Open(cfg.MediaListPath)
 	if err != nil {
 		return "", fmt.Errorf("open media list: %w", err)
@@ -481,7 +453,6 @@ func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
 
 	log.Println("Reading media list from:", cfg.MediaListPath)
 
-	// read first line, check if file exists and is valid, return the found file
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -498,7 +469,7 @@ func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
 			return "", fmt.Errorf("get mediainfo '%s': %w", path, err)
 		}
 
-		if shouldSkipFile(mediaInfo) {
+		if isAlreadyOptimized(mediaInfo) {
 			continue
 		}
 
@@ -515,7 +486,7 @@ func findTargetFileList(ctx context.Context, cfg Config) (string, error) {
 	return "", fmt.Errorf("no valid files found in media list")
 }
 
-func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
+func findVideoFromDirectory(ctx context.Context, cfg Config) (string, error) {
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -524,26 +495,24 @@ func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
 
 	var largestFile string
 	var largestSize int64
-	threshold := timeThreshold
+	threshold := oldestAllowedModTime
 
 	err := filepath.Walk(cfg.MediaDir, func(path string, info os.FileInfo, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		if err != nil || // Skip access errors
-			info.IsDir() {
+		if err != nil || info.IsDir() {
 			return nil
 		}
 
-		if _, ok := optimizedFiles[path]; ok {
-			return nil // already optimized
+		if _, ok := alreadyProcessedFiles[path]; ok {
+			return nil
 		}
 
-		// Filter for video extensions
 		ext := strings.ToLower(filepath.Ext(path))
-		if _, ok := processedExtensions[ext]; !ok {
-			return nil // not a video file
+		if _, ok := validVideoExtensions[ext]; !ok {
+			return nil
 		}
 
 		if info.ModTime().Before(threshold) {
@@ -558,8 +527,8 @@ func findTargetFileWalk(ctx context.Context, cfg Config) (string, error) {
 	return largestFile, err
 }
 
-func shouldSkipFile(info *MediaInfoOutput) bool {
-	skipCodecs := []string{
+func isAlreadyOptimized(info *MediaInfoOutput) bool {
+	alreadyOptimizedCodecs := []string{
 		"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265",
 		"AV1", "V_AV1", "VVC",
 		"DVHE", "V_DVHE", "DVH1", "V_DVH1",
@@ -569,7 +538,7 @@ func shouldSkipFile(info *MediaInfoOutput) bool {
 	for _, track := range info.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
 			codec := strings.ToUpper(track.CodecID)
-			for _, skip := range skipCodecs {
+			for _, skip := range alreadyOptimizedCodecs {
 				if strings.Contains(codec, skip) {
 					return true
 				}
@@ -584,7 +553,6 @@ func shouldSkipFile(info *MediaInfoOutput) bool {
 }
 
 func getMediaInfo(path string) (*MediaInfoOutput, error) {
-	// --Output=JSON is cleaner
 	cmd := exec.Command("mediainfo", "--fullscan", "--Output=JSON", path)
 	out, err := cmd.Output()
 	if err != nil {
@@ -598,8 +566,7 @@ func getMediaInfo(path string) (*MediaInfoOutput, error) {
 	return &data, nil
 }
 
-func getMkvInfo(path string) (*MkvMergeOutput, error) {
-	// Using -J for JSON output
+func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 	cmd := exec.Command("mkvmerge", "-J", path)
 	out, err := cmd.Output()
 	if err != nil {
@@ -613,12 +580,11 @@ func getMkvInfo(path string) (*MkvMergeOutput, error) {
 	return &data, nil
 }
 
-func pickHandbrakePreset(info *MediaInfoOutput) string {
+func selectHandbrakePreset(info *MediaInfoOutput) string {
 	width := 0
 	height := 0
 	bitrate := 0
 
-	// Parse dimensions from MediaInfo
 	for _, track := range info.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
 			width, _ = strconv.Atoi(track.Width)
@@ -627,47 +593,46 @@ func pickHandbrakePreset(info *MediaInfoOutput) string {
 		}
 	}
 
-	// default quality
 	mode := "slow"
 	resolution := "1080p"
-	q := 20
+	quality := 20
 
 	if width > 1920 || height > 1080 {
 		resolution = "2160p"
 		if width >= 2100 || height >= 1200 {
-			q++
+			quality++
 		}
 	}
 	if width < 1280 && height < 720 {
-		q--
+		quality--
 		if width < 854 && height < 480 {
-			q--
+			quality--
 			if width < 640 && height < 360 {
-				q--
+				quality--
 			}
 		}
 	}
 
 	if bitrate != 0 {
 		if bitrate > 5_000_000 {
-			q--
+			quality--
 			if bitrate > 12_000_000 {
-				q--
+				quality--
 			}
 		}
 		if bitrate < 1_500_000 {
-			q++
+			quality++
 		}
 	}
 
 	switch resolution {
 	case "2160p":
-		q = clamp(q, 17, 21)
+		quality = clamp(quality, 17, 21)
 	case "1080p":
-		q = clamp(q, 14, 21)
+		quality = clamp(quality, 14, 21)
 	}
 
-	return strings.Join([]string{mode, resolution, strconv.Itoa(q)}, "-")
+	return strings.Join([]string{mode, resolution, strconv.Itoa(quality)}, "-")
 }
 
 func clamp(val, min, max int) int {
@@ -680,8 +645,7 @@ func clamp(val, min, max int) int {
 	return val
 }
 
-// nice -n 19 HandBrakeCLI ...
-func runHandbrake(ctx context.Context, cfg Config, input, output, preset string) error {
+func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset string) error {
 	args := []string{
 		"-n", "19",
 		"HandBrakeCLI",
@@ -689,14 +653,14 @@ func runHandbrake(ctx context.Context, cfg Config, input, output, preset string)
 		"-Z", preset,
 		"-i", input,
 		"-o", output,
-		"--format", "mkv", // Enforce container
+		"--format", "mkv",
 	}
 
 	log.Println("Running HandbrakeCLI command: nice", args)
 
 	cmd := exec.Command("nice", args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr // Handbrake logs progress to stderr
+	cmd.Stderr = os.Stderr
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -714,31 +678,24 @@ func runHandbrake(ctx context.Context, cfg Config, input, output, preset string)
 	}
 }
 
-// processAudioTracks checks for duplicate languages and remuxes if necessary
-// Returns the path to the valid file (either the original encoded one, or a new remuxed one)
-func processAudioTracks(filePath string, filesToDelete *[]string) (string, error) {
-	info, err := getMkvInfo(filePath)
+func deduplicateAudioTracks(filePath string, tempFiles *[]string) (string, error) {
+	info, err := getMkvMergeInfo(filePath)
 	if err != nil {
 		return "", err
 	}
 
-	// Analyze tracks
 	seenLangs := make(map[string]bool)
 	var keepTrackIDs []string
 	needsRemux := false
-	audioCount := 0
 
 	for _, track := range info.Tracks {
 		if strings.EqualFold(track.Type, "audio") {
-			audioCount++
 			lang := track.Properties.Language
-			// If language is missing, treat as 'und'
 			if lang == "" {
 				lang = "und"
 			}
 
 			if seenLangs[lang] {
-				// Duplicate found, do not add to keep list
 				needsRemux = true
 				log.Printf("Duplicate audio language found: %s. Dropping track ID %d.", lang, track.ID)
 			} else {
@@ -746,12 +703,9 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 				keepTrackIDs = append(keepTrackIDs, strconv.Itoa(track.ID))
 			}
 		} else {
-			// Keep video/subs/etc
 			keepTrackIDs = append(keepTrackIDs, strconv.Itoa(track.ID))
 		}
 	}
-
-	// "If there are more than 2 languages, file is checked with mediainfo"
 
 	if !needsRemux {
 		log.Println("Audio tracks are optimal. No remuxing needed.")
@@ -760,24 +714,14 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 
 	log.Println("Remuxing to remove duplicate audio tracks...")
 
-	remuxFile, err := os.CreateTemp(tmpDir, "video_remux_*.mkv")
+	remuxFile, err := os.CreateTemp(tempDirectory, "video_remux_*.mkv")
 	if err != nil {
 		return "", err
 	}
 	remuxPath := remuxFile.Name()
 	remuxFile.Close()
 
-	*filesToDelete = append(*filesToDelete, remuxPath)
-
-	// mkvmerge -o output.mkv --audio-tracks id1,id2 input.mkv
-	// Note: mkvmerge --audio-tracks expects specifically audio IDs.
-	// However, a simpler way to keep specific tracks globally is using generic -a -d -s logic
-	// or --tracks but that can be complex.
-	// Easiest is to construct a specific command that disables specific tracks,
-	// OR use the --tracks (or -t) logic to keep everything listed.
-
-	// Actually, mkvmerge logic: By default keeps all. We want to explicitely keep specific ones.
-	// Let's use the track IDs found in JSON (which are global IDs for mkvmerge).
+	*tempFiles = append(*tempFiles, remuxPath)
 
 	args := []string{
 		"-o", remuxPath,
@@ -797,7 +741,6 @@ func processAudioTracks(filePath string, filesToDelete *[]string) (string, error
 	return remuxPath, nil
 }
 
-// copyFile is a manual fallback if Rename fails across filesystems
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -819,12 +762,10 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// formatNum formats an integer with comma separators (e.g. 1234567 -> "1,234,567")
 func formatNum[T int | int64](n T) string {
 	return formatStr(strconv.Itoa(int(n)))
 }
 
-// Format bitrate nicely (e.g. 1,234,567 bps) by 3 digits from end
 func formatStr(s string) string {
 	n := len(s)
 	if n <= 3 {
