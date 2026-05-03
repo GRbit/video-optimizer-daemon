@@ -41,6 +41,13 @@ var (
 	}()
 	alreadyProcessedFiles = make(map[string]struct{})
 	tempDirectory         string
+
+	// sidecarExtensions define list of file extensions that should be merged into the final output if they exist alongside the original video file
+	sidecarExtensions = map[string]bool{
+		".ass": true,
+		".srt": true,
+		".mka": true,
+	}
 )
 
 type Config struct {
@@ -279,7 +286,8 @@ func processVideoFile(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	finalPath, err = mergeSidecarFiles(ctx, targetFile, finalPath, &tempFiles)
+	var sidecarFiles []string
+	finalPath, sidecarFiles, err = mergeSidecarFiles(ctx, targetFile, finalPath, &tempFiles)
 	if err != nil {
 		return fmt.Errorf("merge subtitles and sound: %w", err)
 	}
@@ -288,24 +296,26 @@ func processVideoFile(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("replace encoded file: %w", err)
 	}
 
+	for _, sf := range sidecarFiles {
+		if err := os.Remove(sf); err != nil {
+			log.Printf("Failed to remove sidecar file %s: %v", sf, err)
+		} else {
+			log.Printf("Removed sidecar file: %s", sf)
+		}
+	}
+
 	log.Println("Encoding completed successfully for:", targetFile)
 
 	return nil
 }
 
-func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFiles *[]string) (string, error) {
+func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFiles *[]string) (string, []string, error) {
 	dir := filepath.Dir(targetFile)
 	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
 
-	sidecarExts := map[string]bool{
-		".ass": true,
-		".srt": true,
-		".mka": true,
-	}
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return finalPath, fmt.Errorf("read directory for sidecar files: %w", err)
+		return finalPath, nil, fmt.Errorf("read directory for sidecar files: %w", err)
 	}
 
 	var sidecarFiles []string
@@ -314,7 +324,7 @@ func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFi
 		if !strings.HasPrefix(name, origBase) {
 			continue
 		}
-		if !sidecarExts[strings.ToLower(filepath.Ext(name))] {
+		if !sidecarExtensions[strings.ToLower(filepath.Ext(name))] {
 			continue
 		}
 		sidecarFiles = append(sidecarFiles, filepath.Join(dir, name))
@@ -322,14 +332,14 @@ func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFi
 
 	if len(sidecarFiles) == 0 {
 		log.Println("No sidecar subtitle/audio files found, skipping merge.")
-		return finalPath, nil
+		return finalPath, nil, nil
 	}
 
 	log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecarFiles), sidecarFiles)
 
 	mergedFile, err := os.CreateTemp(tempDirectory, "video_merged_*.mkv")
 	if err != nil {
-		return finalPath, fmt.Errorf("create temp file for sidecar merge: %w", err)
+		return finalPath, nil, fmt.Errorf("create temp file for sidecar merge: %w", err)
 	}
 	mergedPath := mergedFile.Name()
 	mergedFile.Close()
@@ -347,11 +357,11 @@ func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFi
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("mkvmerge merge output: %s", string(out))
-		return finalPath, fmt.Errorf("mkvmerge sidecar merge: %w", err)
+		return finalPath, nil, fmt.Errorf("mkvmerge sidecar merge: %w", err)
 	}
 
 	log.Println("Sidecar merge successful.")
-	return mergedPath, nil
+	return mergedPath, sidecarFiles, nil
 }
 
 func replaceOriginalWithEncoded(targetFile, finalPath string) error {

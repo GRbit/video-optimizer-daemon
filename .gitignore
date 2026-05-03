@@ -1,4 +1,5 @@
 main
+video-optimizer-daemon
 *.avi
 *.mkv
 *.mp4
