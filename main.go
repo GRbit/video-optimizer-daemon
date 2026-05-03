@@ -135,7 +135,6 @@ func main() {
 		case <-ticker.C:
 			if err := processVideoFile(ctx, cfg); err != nil {
 				log.Println("Error during encoding: ", err)
-				os.Exit(1)
 				ticker.Reset(time.Hour)
 			}
 		}
@@ -157,273 +156,12 @@ func processVideoFile(ctx context.Context, cfg Config) error {
 
 	log.Printf("Found target candidate: %s", targetFile)
 
-	mediaInfo, err := getMediaInfo(targetFile)
-	if err != nil {
-		return fmt.Errorf("get mediainfo: %w", err)
+	task := &VideoConvertTask{
+		cfg:        cfg,
+		targetPath: targetFile,
 	}
 
-	for _, track := range mediaInfo.Media.Tracks {
-		if strings.EqualFold(track.Type, "video") {
-			bitrate := formatStr(track.Bitrate)
-			log.Printf("Format: %s, CodecID: %s, %sx%sp %s bps", track.Format, track.CodecID, track.Width, track.Height, bitrate)
-			break
-		}
-	}
-
-	log.Printf("File Size: %s", getFileSize(targetFile))
-
-	if isAlreadyOptimized(mediaInfo) {
-		log.Println("File already optimized, skipping.")
-		alreadyProcessedFiles[targetFile] = struct{}{}
-		return nil
-	}
-
-	preset := selectHandbrakePreset(mediaInfo)
-	log.Printf("Selected Preset: %s", preset)
-
-	if cfg.PromptMode {
-		fmt.Printf("\n--- ACTION REQUIRED ---\n")
-		fmt.Printf("File to convert: %s\n", targetFile)
-		fmt.Print("Start conversion? (y/n): ")
-
-		reader := bufio.NewReader(os.Stdin)
-
-		var (
-			response string
-			errCh    = make(chan error)
-		)
-		go func() {
-			var err error
-			response, err = reader.ReadString('\n')
-			errCh <- err
-		}()
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-errCh:
-			if err != nil {
-				return fmt.Errorf("reading user input: %w", err)
-			}
-		}
-
-		response = strings.TrimSpace(strings.ToLower(response))
-
-		if response != "y" && response != "yes" {
-			log.Printf("Conversion was declined")
-			alreadyProcessedFiles[targetFile] = struct{}{}
-			return nil
-		}
-	}
-
-	encodedFile, err := os.CreateTemp(tempDirectory, "video_opt_*.mkv")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tempFilePath := encodedFile.Name()
-	encodedFile.Close()
-
-	log.Println("temp file created:", tempFilePath)
-
-	tempFiles := []string{tempFilePath}
-
-	defer func() {
-		for _, f := range tempFiles {
-			if _, err := os.Stat(f); err == nil {
-				log.Printf("Cleaning up temp file: %s", f)
-				os.Remove(f)
-			}
-		}
-	}()
-
-	log.Println("Starting HandBrake conversion...")
-	err = runHandbrakeCLI(ctx, cfg, targetFile, tempFilePath, preset)
-	if err != nil {
-		return fmt.Errorf("run handbrake: %w", err)
-	}
-	log.Println("HandBrake finished successfully.")
-
-	log.Println("Checking audio tracks on converted file...")
-	finalPath, err := deduplicateAudioTracks(tempFilePath, &tempFiles)
-	if err != nil {
-		return fmt.Errorf("process audio tracks: %w", err)
-	}
-
-	if cfg.PromptMode {
-		fmt.Printf("\n--- ACTION REQUIRED ---\n")
-		fmt.Printf("Original: %s\n", targetFile)
-		fmt.Printf("Original size: %s\n", getFileSize(targetFile))
-		fmt.Printf("New File: %s\n", finalPath)
-		fmt.Printf("New size: %s\n", getFileSize(finalPath))
-		fmt.Print("Replace original file? (y/n): ")
-
-		reader := bufio.NewReader(os.Stdin)
-
-		var (
-			response string
-			errCh    = make(chan error)
-		)
-		go func() {
-			var err error
-			response, err = reader.ReadString('\n')
-			errCh <- err
-		}()
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-errCh:
-			if err != nil {
-				return fmt.Errorf("reading user input: %w", err)
-			}
-		}
-
-		response = strings.TrimSpace(strings.ToLower(response))
-
-		if response != "y" && response != "yes" {
-			log.Printf("File replacement cancelled")
-			return nil
-		}
-	}
-
-	var sidecarFiles []string
-	finalPath, sidecarFiles, err = mergeSidecarFiles(ctx, targetFile, finalPath, &tempFiles)
-	if err != nil {
-		return fmt.Errorf("merge subtitles and sound: %w", err)
-	}
-
-	if err := replaceOriginalWithEncoded(targetFile, finalPath); err != nil {
-		return fmt.Errorf("replace encoded file: %w", err)
-	}
-
-	for _, sf := range sidecarFiles {
-		if err := os.Remove(sf); err != nil {
-			log.Printf("Failed to remove sidecar file %s: %v", sf, err)
-		} else {
-			log.Printf("Removed sidecar file: %s", sf)
-		}
-	}
-
-	log.Println("Encoding completed successfully for:", targetFile)
-
-	return nil
-}
-
-func mergeSidecarFiles(ctx context.Context, targetFile, finalPath string, tempFiles *[]string) (string, []string, error) {
-	dir := filepath.Dir(targetFile)
-	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return finalPath, nil, fmt.Errorf("read directory for sidecar files: %w", err)
-	}
-
-	var sidecarFiles []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, origBase) {
-			continue
-		}
-		if !sidecarExtensions[strings.ToLower(filepath.Ext(name))] {
-			continue
-		}
-		sidecarFiles = append(sidecarFiles, filepath.Join(dir, name))
-	}
-
-	if len(sidecarFiles) == 0 {
-		log.Println("No sidecar subtitle/audio files found, skipping merge.")
-		return finalPath, nil, nil
-	}
-
-	log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecarFiles), sidecarFiles)
-
-	mergedFile, err := os.CreateTemp(tempDirectory, "video_merged_*.mkv")
-	if err != nil {
-		return finalPath, nil, fmt.Errorf("create temp file for sidecar merge: %w", err)
-	}
-	mergedPath := mergedFile.Name()
-	mergedFile.Close()
-
-	*tempFiles = append(*tempFiles, mergedPath)
-
-	args := []string{"-o", mergedPath, finalPath}
-	for _, sf := range sidecarFiles {
-		args = append(args, sf)
-	}
-
-	log.Println("Running mkvmerge to merge sidecars: mkvmerge", args)
-
-	cmd := exec.CommandContext(ctx, "mkvmerge", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("mkvmerge merge output: %s", string(out))
-		return finalPath, nil, fmt.Errorf("mkvmerge sidecar merge: %w", err)
-	}
-
-	log.Println("Sidecar merge successful.")
-	return mergedPath, sidecarFiles, nil
-}
-
-func replaceOriginalWithEncoded(targetFile, finalPath string) error {
-	var newFilePath string
-	if strings.Contains(strings.ToLower(targetFile), "264") {
-		newFilePath = strings.ReplaceAll(targetFile, "264", "265")
-	} else {
-		newFilePath = strings.TrimSuffix(targetFile, filepath.Ext(targetFile)) + ".x265.mkv"
-	}
-
-	newFilePath = replaceCasePreserving(newFilePath, "flac", "ogg")
-	newFilePath = replaceCasePreserving(newFilePath, "aac", "ogg")
-
-	log.Printf("Replacing %s with optimized version with name %s", targetFile, newFilePath)
-
-	err := os.Rename(finalPath, newFilePath)
-	if err != nil {
-		log.Println("Rename failed, attempting copy and delete:", err)
-		err = copyFile(finalPath, newFilePath)
-		if err != nil {
-			return fmt.Errorf("Replace original file: %w", err)
-		}
-		log.Println("File copied successfully.")
-	} else {
-		log.Println("File renamed successfully.")
-	}
-
-	err = os.Remove(targetFile)
-	if err != nil {
-		return fmt.Errorf("Remove original file: %w", err)
-	}
-
-	log.Println("Original file removed successfully (", targetFile, ")")
-
-	origBase := strings.TrimSuffix(filepath.Base(targetFile), filepath.Ext(targetFile))
-	newBase := strings.TrimSuffix(filepath.Base(newFilePath), filepath.Ext(newFilePath))
-	dir := filepath.Dir(targetFile)
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read directory for sibling rename: %w", err)
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, origBase) {
-			continue
-		}
-		oldPath := filepath.Join(dir, name)
-		if oldPath == targetFile || oldPath == newFilePath {
-			continue
-		}
-		suffix := name[len(origBase):]
-		newPath := filepath.Join(dir, newBase+suffix)
-		if err := os.Rename(oldPath, newPath); err != nil {
-			log.Printf("Failed to rename sibling file %s: %v", oldPath, err)
-		} else {
-			log.Printf("Renamed sibling file %s to %s", oldPath, newPath)
-		}
-	}
-
-	return nil
+	return task.Run(ctx)
 }
 
 func replaceCasePreserving(s, old, new string) string {
@@ -668,87 +406,11 @@ func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset stri
 
 	log.Println("Running HandbrakeCLI command: nice", args)
 
-	cmd := exec.Command("nice", args...)
+	cmd := exec.CommandContext(ctx, "nice", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- cmd.Run()
-	}()
-
-	select {
-	case <-ctx.Done():
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		return ctx.Err()
-	case err := <-errCh:
-		return err
-	}
-}
-
-func deduplicateAudioTracks(filePath string, tempFiles *[]string) (string, error) {
-	info, err := getMkvMergeInfo(filePath)
-	if err != nil {
-		return "", err
-	}
-
-	seenLangs := make(map[string]bool)
-	var keepTrackIDs []string
-	needsRemux := false
-
-	for _, track := range info.Tracks {
-		if strings.EqualFold(track.Type, "audio") {
-			lang := track.Properties.Language
-			if lang == "" {
-				lang = "und"
-			}
-
-			if seenLangs[lang] {
-				needsRemux = true
-				log.Printf("Duplicate audio language found: %s. Dropping track ID %d.", lang, track.ID)
-			} else {
-				seenLangs[lang] = true
-				keepTrackIDs = append(keepTrackIDs, strconv.Itoa(track.ID))
-			}
-		} else {
-			keepTrackIDs = append(keepTrackIDs, strconv.Itoa(track.ID))
-		}
-	}
-
-	if !needsRemux {
-		log.Println("Audio tracks are optimal. No remuxing needed.")
-		return filePath, nil
-	}
-
-	log.Println("Remuxing to remove duplicate audio tracks...")
-
-	remuxFile, err := os.CreateTemp(tempDirectory, "video_remux_*.mkv")
-	if err != nil {
-		return "", err
-	}
-	remuxPath := remuxFile.Name()
-	remuxFile.Close()
-
-	*tempFiles = append(*tempFiles, remuxPath)
-
-	args := []string{
-		"-o", remuxPath,
-		"--audio-tracks", strings.Join(keepTrackIDs, ","),
-		filePath,
-	}
-
-	log.Println("Running mkvmerge with args: mkvmerge", args)
-
-	cmd := exec.Command("mkvmerge", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("Mkvmerge remux output: %s", string(output))
-		return "", fmt.Errorf("remux failed: %w", err)
-	}
-
-	return remuxPath, nil
+	return cmd.Run()
 }
 
 func copyFile(src, dst string) error {
@@ -806,4 +468,30 @@ func getFileSize(p string) string {
 		return "N/A"
 	}
 	return formatNum(info.Size())
+}
+
+func promptConfirm(ctx context.Context) (bool, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	var (
+		response string
+		errCh    = make(chan error)
+	)
+	go func() {
+		var err error
+		response, err = reader.ReadString('\n')
+		errCh <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case err := <-errCh:
+		if err != nil {
+			return false, fmt.Errorf("reading user input: %w", err)
+		}
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes", nil
 }
