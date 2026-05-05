@@ -21,7 +21,7 @@ type VideoConvertTask struct {
 }
 
 func (t *VideoConvertTask) CreateTempFile(prefix string) error {
-	f, err := os.CreateTemp(tempDirectory, prefix)
+	f, err := os.CreateTemp(t.cfg.TempDirPath, prefix)
 	if err != nil {
 		return err
 	}

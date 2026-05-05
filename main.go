@@ -24,9 +24,10 @@ const (
 	envHandbrakeConf = "HANDBRAKE_CONF"
 	envPromptMode    = "PROMPT_MODE"
 	envMediaList     = "MEDIA_LIST_PATH"
+	envTempDirPath   = "TEMP_DIR"
 
 	defaultMediaDir      = "/media"
-	defaultHandbrakeConf = "/root/.config/ghb/presets.json"
+	defaultHandbrakeConf = "$HOME/.config/ghb/presets.json"
 )
 
 var (
@@ -40,7 +41,6 @@ var (
 		return ret
 	}()
 	alreadyProcessedFiles = make(map[string]struct{})
-	tempDirectory         string
 
 	// sidecarExtensions define list of file extensions that should be merged into the final output if they exist alongside the original video file
 	sidecarExtensions = map[string]bool{
@@ -55,6 +55,7 @@ type Config struct {
 	MediaDir             string
 	MediaListPath        string
 	HandbrakePresetsPath string
+	TempDirPath          string
 }
 
 type MediaInfoOutput struct {
@@ -91,13 +92,12 @@ func main() {
 	tmpDirPtr := flag.String("tmp", os.TempDir(), "Directory to use for temporary files")
 	flag.Parse()
 
-	tempDirectory = *tmpDirPtr
-
 	cfg := Config{
 		PromptMode:           *promptPtr,
 		MediaDir:             *mediaDirPtr,
 		MediaListPath:        *mediaListPtr,
 		HandbrakePresetsPath: *handbrakeConfPtr,
+		TempDirPath:          *tmpDirPtr,
 	}
 	if os.Getenv(envMediaDir) != "" {
 		cfg.MediaDir = os.Getenv(envMediaDir)
@@ -111,6 +111,9 @@ func main() {
 	}
 	if os.Getenv(envMediaList) != "" {
 		cfg.MediaListPath = os.Getenv(envMediaList)
+	}
+	if os.Getenv(envTempDirPath) != "" {
+		cfg.TempDirPath = os.Getenv(envTempDirPath)
 	}
 
 	log.Println("Starting Video Optimizer Daemon...")
@@ -133,15 +136,15 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := processVideoFile(ctx, cfg); err != nil {
+			if err := processVideoFiles(ctx, cfg); err != nil {
 				log.Println("Error during encoding: ", err)
-				ticker.Reset(time.Hour)
+				ticker.Reset(time.Minute)
 			}
 		}
 	}
 }
 
-func processVideoFile(ctx context.Context, cfg Config) error {
+func processVideoFiles(ctx context.Context, cfg Config) error {
 	targetFile, err := findTargetVideoFile(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -279,6 +282,7 @@ func isAlreadyOptimized(info *MediaInfoOutput) bool {
 	alreadyOptimizedCodecs := []string{
 		"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265",
 		"AV1", "V_AV1", "VVC",
+		"AV2", "V_AV2",
 		"DVHE", "V_DVHE", "DVH1", "V_DVH1",
 		"HVC1", "HVC2",
 	}

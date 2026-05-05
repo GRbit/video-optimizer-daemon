@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    cap_add:
+      - SYS_NICE # for set_mempolicy call
+    container_name: video-optimizer-daemon
+    user: "1000:1000"
+    volumes:
+      - ${MEDIA_DIR}:${MEDIA_DIR}
+      - ${TEMP_DIR}:${TEMP_DIR}
+      # path to your handbrake presets.json dir like ~/.config/ghb
+      #- /home/user/.config/ghb/:/ghb
+    environment:
+      - MEDIA_DIR=${MEDIA_DIR}
+      - TEMP_DIR=${TEMP_DIR}
+      - MEDIA_LIST_PATH=${MEDIA_LIST_PATH}
+      - HANDBRAKE_CONF=/ghb/presets.json
+    restart: always
