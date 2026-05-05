@@ -20,17 +20,6 @@ type VideoConvertTask struct {
 	completed    bool
 }
 
-func (t *VideoConvertTask) CreateTempFile(prefix string) error {
-	f, err := os.CreateTemp(t.cfg.TempDirPath, prefix)
-	if err != nil {
-		return err
-	}
-	path := f.Name()
-	f.Close()
-	t.tempFiles = append(t.tempFiles, path)
-	return nil
-}
-
 func (t *VideoConvertTask) CleanUp() {
 	for _, f := range t.tempFiles {
 		if _, err := os.Stat(f); err == nil {
@@ -95,8 +84,8 @@ func (t *VideoConvertTask) Run(ctx context.Context) error {
 		}
 	}
 
-	if err := t.CreateTempFile("video_opt_*.mkv"); err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+	if err := t.createTempFile("video_opt_*.mkv"); err != nil {
+		return fmt.Errorf("creating video_opt: %w", err)
 	}
 	log.Println("temp file created:", t.tempFiles[0])
 
@@ -111,7 +100,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) error {
 
 	log.Println("Checking audio tracks on converted file...")
 	if err := t.deduplicateAudioTracks(ctx); err != nil {
-		return fmt.Errorf("process audio tracks: %w", err)
+		return fmt.Errorf("deduplicating audio tracks: %w", err)
 	}
 
 	if t.cfg.PromptMode {
@@ -174,8 +163,8 @@ func (t *VideoConvertTask) mergeSidecarFiles(ctx context.Context) error {
 	log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecarFiles), sidecarFiles)
 	t.sidecarFiles = sidecarFiles
 
-	if err := t.CreateTempFile("video_merged_*.mkv"); err != nil {
-		return fmt.Errorf("create temp file for sidecar merge: %w", err)
+	if err := t.createTempFile("video_merged_*.mkv"); err != nil {
+		return fmt.Errorf("creating video_merged_: %w", err)
 	}
 	mergedPath := t.tempFiles[len(t.tempFiles)-1]
 
@@ -297,8 +286,8 @@ func (t *VideoConvertTask) deduplicateAudioTracks(ctx context.Context) error {
 
 	log.Println("Remuxing to remove duplicate audio tracks...")
 
-	if err := t.CreateTempFile("video_remux_*.mkv"); err != nil {
-		return err
+	if err := t.createTempFile("video_remux_*.mkv"); err != nil {
+		return fmt.Errorf("creating video_remux: %w", err)
 	}
 	remuxPath := t.tempFiles[len(t.tempFiles)-1]
 
@@ -321,5 +310,16 @@ func (t *VideoConvertTask) deduplicateAudioTracks(ctx context.Context) error {
 	log.Println("Audio deduplication mkvmerge remux successful, updated file is:", remuxPath)
 
 	t.finalPath = remuxPath
+	return nil
+}
+
+func (t *VideoConvertTask) createTempFile(prefix string) error {
+	f, err := os.CreateTemp(t.cfg.TempDirPath, prefix)
+	defer closeCloser(f)
+	if err != nil {
+		return fmt.Errorf("creating tmp file: %w", err)
+	}
+	path := f.Name()
+	t.tempFiles = append(t.tempFiles, path)
 	return nil
 }

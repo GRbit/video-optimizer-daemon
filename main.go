@@ -197,10 +197,10 @@ func findTargetVideoFile(ctx context.Context, cfg Config) (string, error) {
 
 func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
 	file, err := os.Open(cfg.MediaListPath)
+	defer closeCloser(file)
 	if err != nil {
 		return "", fmt.Errorf("open media list: %w", err)
 	}
-	defer file.Close()
 
 	log.Println("Reading media list from:", cfg.MediaListPath)
 
@@ -322,12 +322,12 @@ func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 	cmd := exec.Command("mkvmerge", "-J", path)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mkvmerge -J: %w", err)
 	}
 
 	var data MkvMergeOutput
 	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mkvmerge: unmarshal JSON: %w", err)
 	}
 	return &data, nil
 }
@@ -419,23 +419,23 @@ func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset stri
 
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
+	defer closeCloser(in)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating input file: %w", err)
 	}
-	defer in.Close()
 
 	out, err := os.Create(dst)
+	defer closeCloser(out)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating output file: %w", err)
 	}
-	defer out.Close()
 
 	_, err = io.Copy(out, in)
 	if err != nil {
-		return err
+		return fmt.Errorf("copying data: %w", err)
 	}
 
-	return out.Close()
+	return nil
 }
 
 func formatNum[T int | int64](n T) string {
@@ -498,4 +498,24 @@ func promptConfirm(ctx context.Context) (bool, error) {
 
 	response = strings.TrimSpace(strings.ToLower(response))
 	return response == "y" || response == "yes", nil
+}
+
+func closeCloser(c io.Closer) {
+	if c == nil {
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			if r == "runtime error: invalid memory address or nil pointer dereference" {
+				log.Printf("Attempted to close a nil pointer: %v", r)
+				return
+			}
+			panic(r)
+		}
+	}()
+
+	if err := c.Close(); err != nil {
+		log.Printf("Failed to close: %v", err)
+	}
 }
