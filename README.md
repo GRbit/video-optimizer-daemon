@@ -1,9 +1,6 @@
-# video-optimizer(1) -- Continuous video transcoding daemon
+# video-optimizer-daemon 
 
-## NAME
-
-**video-optimizer** -- scan media directories and automatically transcode
-video files to HEVC/x265 using HandBrakeCLI.
+Continuous video transcoding daemon. Scan media directories and automatically transcode video files to HEVC/x265 using HandBrakeCLI.
 
 ## SYNOPSIS
 
@@ -22,12 +19,12 @@ The daemon runs in a tight loop, selecting the largest eligible video file each
 cycle, transcoding it, deduplicating audio tracks, merging sidecar subtitle and
 audio files, and replacing the original with the optimized output.
 
-**REQUIRES**:
+**Requirements**:
 * mediainfo
 * mkvmerge
 * HandBrakeCLI
 * HandBrakeCLI profiles with a name format of *mode*-*resolution*-*crf* (e.g. `slow-1080p-20`),
-  see selectHandbrakePreset function for details.
+  see `selectHandbrakePreset` function for details.
 
 ### Eligibility
 
@@ -121,15 +118,3 @@ options:
 
 **TEMP_DIR**
 : Overrides `-tmp`.
-
-## DEPENDENCIES
-
-The daemon requires the following tools to be available on `$PATH`:
-
-- **mediainfo** -- Inspect video files for codec and resolution info.
-- **HandBrakeCLI** -- Transcode video files.
-- **mkvmerge** -- Merge sidecar files and deduplicate audio tracks.
-
-## SEE ALSO
-
-**HandBrakeCLI**(1), **mkvmerge**(1), **mediainfo**(1)
