@@ -2,6 +2,10 @@
 
 Continuous video transcoding daemon. Scan media directories and automatically transcode video files to HEVC/x265 using HandBrakeCLI.
 
+# DISCLAIMER
+
+Purpose-built for a specific use case, not a generic solution.
+
 ## SYNOPSIS
 
 ```
