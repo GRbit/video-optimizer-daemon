@@ -97,6 +97,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) error {
 		return fmt.Errorf("run handbrake: %w", err)
 	}
 	log.Println("HandBrake finished successfully.")
+	t.finalPath = t.tempFiles[0]
 
 	log.Println("Checking audio tracks on converted file...")
 	if err := t.deduplicateAudioTracks(ctx); err != nil {

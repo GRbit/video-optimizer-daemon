@@ -322,12 +322,12 @@ func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 	cmd := exec.Command("mkvmerge", "-J", path)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("mkvmerge -J: %w", err)
+		return nil, fmt.Errorf("mkvmerge -J %s: %w", path, err)
 	}
 
 	var data MkvMergeOutput
 	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, fmt.Errorf("mkvmerge: unmarshal JSON: %w", err)
+		return nil, fmt.Errorf("mkvmerge: unmarshal JSON '%s': %w", string(out), err)
 	}
 	return &data, nil
 }
