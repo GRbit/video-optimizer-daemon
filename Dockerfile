@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     handbrake-cli \
     mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 # setup permissions
 RUN groupadd -g 1000 mygroup && \
