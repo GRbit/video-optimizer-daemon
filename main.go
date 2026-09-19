@@ -16,7 +16,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 )
 
 const (
@@ -26,12 +25,14 @@ const (
 	envMediaList     = "MEDIA_LIST_PATH"
 	envTempDirPath   = "TEMP_DIR"
 
-	defaultMediaDir      = "/media"
-	defaultHandbrakeConf = "$HOME/.config/ghb/presets.json"
+	defaultMediaDir = "/media"
+
+	// retryDelay is the pause after an empty scan or a failed task. A successful
+	// task is followed by the next scan immediately.
+	retryDelay = time.Minute
 )
 
 var (
-	oldestAllowedModTime = time.Now().AddDate(0, -1, 0) // 1 month ago
 	validVideoExtensions = func() map[string]struct{} {
 		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
 		ret := make(map[string]struct{}, len(exts))
@@ -68,6 +69,7 @@ type MediaInfoOutput struct {
 			Width    string `json:"Width"`
 			Height   string `json:"Height"`
 			Bitrate  string `json:"Bitrate"`
+			Duration string `json:"Duration"`
 		} `json:"track"`
 	} `json:"media"`
 }
@@ -84,11 +86,22 @@ type MkvMergeOutput struct {
 	} `json:"tracks"`
 }
 
+// defaultHandbrakeConf returns the HandBrake GUI presets file in the user's
+// home, or "" when the home directory is unknown. A literal "$HOME/..." would
+// reach HandBrakeCLI unexpanded, so the path is resolved here.
+func defaultHandbrakeConf() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "ghb", "presets.json")
+}
+
 func main() {
 	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
-	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf, "Path to HandBrake presets JSON file")
-	mediaListPtr := flag.String("media-list", "", "Path to media list file (not used currently)")
+	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf(), "Path to HandBrake presets JSON file")
+	mediaListPtr := flag.String("media-list", "", "Path to a file with video paths, one per line; replaces directory scanning")
 	tmpDirPtr := flag.String("tmp", os.TempDir(), "Directory to use for temporary files")
 	flag.Parse()
 
@@ -116,8 +129,12 @@ func main() {
 		cfg.TempDirPath = os.Getenv(envTempDirPath)
 	}
 
+	if cfg.HandbrakePresetsPath == "" {
+		log.Fatalf("handbrake presets path is not set: pass -handbrake-conf or %s (home directory could not be determined)", envHandbrakeConf)
+	}
+
 	log.Println("Starting Video Optimizer Daemon...")
-	log.Println("Configuration: ", cfg)
+	log.Printf("Configuration: %+v", cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -129,32 +146,43 @@ func main() {
 		cancel()
 	}()
 
-	ticker := time.NewTicker(time.Nanosecond)
+	for ctx.Err() == nil {
+		processed, err := processVideoFiles(ctx, cfg)
+		if ctx.Err() != nil {
+			return
+		}
+		switch {
+		case err != nil:
+			log.Println("Error during encoding: ", err)
+		case processed:
+			continue
+		default:
+			log.Printf("No eligible files found, next scan in %v", retryDelay)
+		}
 
-	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := processVideoFiles(ctx, cfg); err != nil {
-				log.Println("Error during encoding: ", err)
-				ticker.Reset(time.Minute)
-			}
+		case <-time.After(retryDelay):
 		}
 	}
 }
 
-func processVideoFiles(ctx context.Context, cfg Config) error {
+// processVideoFiles picks one candidate and runs the conversion task on it. It
+// returns false when nothing was eligible. The candidate is marked as processed
+// whatever the outcome (success, skip, decline, error): a broken file that is
+// retried every scan blocks the whole queue.
+func processVideoFiles(ctx context.Context, cfg Config) (bool, error) {
 	targetFile, err := findTargetVideoFile(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
-		return fmt.Errorf("search files: %w", err)
+		return false, fmt.Errorf("search files: %w", err)
 	}
 
 	if targetFile == "" {
-		return fmt.Errorf("no matching files found (older than %v)", time.Since(oldestAllowedModTime))
+		return false, nil
 	}
 
 	log.Printf("Found target candidate: %s", targetFile)
@@ -164,28 +192,13 @@ func processVideoFiles(ctx context.Context, cfg Config) error {
 		targetPath: targetFile,
 	}
 
-	return task.Run(ctx)
-}
-
-func replaceCasePreserving(s, old, new string) string {
-	lowerS := strings.ToLower(s)
-	lowerOld := strings.ToLower(old)
-	idx := strings.Index(lowerS, lowerOld)
-	if idx == -1 {
-		return s
+	err = task.Run(ctx)
+	if ctx.Err() != nil {
+		// Shutdown interrupted the task; leave it eligible for the next start.
+		return false, ctx.Err()
 	}
-	matched := s[idx : idx+len(old)]
-	result := []rune(new)
-	for i, ch := range result {
-		if i < len(matched) {
-			if unicode.IsUpper(rune(matched[i])) {
-				result[i] = unicode.ToUpper(ch)
-			} else {
-				result[i] = unicode.ToLower(ch)
-			}
-		}
-	}
-	return s[:idx] + string(result) + s[idx+len(old):]
+	alreadyProcessedFiles[targetFile] = struct{}{}
+	return true, err
 }
 
 func findTargetVideoFile(ctx context.Context, cfg Config) (string, error) {
@@ -210,6 +223,12 @@ func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
 			return "", ctx.Err()
 		}
 		path := strings.TrimSpace(scanner.Text())
+		if path == "" {
+			continue
+		}
+		if _, ok := alreadyProcessedFiles[path]; ok {
+			continue
+		}
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			continue
@@ -217,15 +236,18 @@ func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
 
 		mediaInfo, err := getMediaInfo(path)
 		if err != nil {
-			return "", fmt.Errorf("get mediainfo '%s': %w", path, err)
+			// One unreadable entry must not stall the whole list forever.
+			log.Printf("Skipping '%s': get mediainfo: %v", path, err)
+			alreadyProcessedFiles[path] = struct{}{}
+			continue
 		}
 
 		if isAlreadyOptimized(mediaInfo) {
+			alreadyProcessedFiles[path] = struct{}{}
 			continue
 		}
 
 		log.Println("Found valid file in media list: ", path)
-		log.Println("Info:", info)
 
 		return path, nil
 	}
@@ -234,7 +256,7 @@ func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
 		return "", fmt.Errorf("read media list: %w", err)
 	}
 
-	return "", fmt.Errorf("no valid files found in media list")
+	return "", nil
 }
 
 func findVideoFromDirectory(ctx context.Context, cfg Config) (string, error) {
@@ -246,7 +268,9 @@ func findVideoFromDirectory(ctx context.Context, cfg Config) (string, error) {
 
 	var largestFile string
 	var largestSize int64
-	threshold := oldestAllowedModTime
+	// Recomputed per scan: a daemon-wide constant would freeze at start time
+	// and newer files would never become eligible.
+	threshold := time.Now().AddDate(0, -1, 0)
 
 	err := filepath.Walk(cfg.MediaDir, func(path string, info os.FileInfo, err error) error {
 		if ctx.Err() != nil {
@@ -417,22 +441,49 @@ func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset stri
 	return cmd.Run()
 }
 
-func copyFile(src, dst string) error {
+// copyFile is the cross-device fallback for os.Rename. The original is deleted
+// right after it succeeds, so a partial destination is removed on any failure
+// and the copy is fsynced and size-checked before reporting success.
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
-	defer closeCloser(in)
 	if err != nil {
-		return fmt.Errorf("creating input file: %w", err)
+		return fmt.Errorf("opening input file: %w", err)
+	}
+	defer closeCloser(in)
+
+	srcStat, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat input file: %w", err)
 	}
 
 	out, err := os.Create(dst)
-	defer closeCloser(out)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("Failed to remove partial copy %s: %v", dst, rmErr)
+			}
+		}
+	}()
 
-	_, err = io.Copy(out, in)
+	written, err := io.Copy(out, in)
 	if err != nil {
+		closeCloser(out)
 		return fmt.Errorf("copying data: %w", err)
+	}
+	if err = out.Sync(); err != nil {
+		closeCloser(out)
+		return fmt.Errorf("syncing output file: %w", err)
+	}
+	if err = out.Close(); err != nil {
+		return fmt.Errorf("closing output file: %w", err)
+	}
+
+	if written != srcStat.Size() {
+		err = fmt.Errorf("size mismatch after copy: source %d bytes, written %d bytes", srcStat.Size(), written)
+		return err
 	}
 
 	return nil
