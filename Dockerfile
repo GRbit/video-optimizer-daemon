@@ -12,6 +12,7 @@ FROM debian:bookworm-slim
 # install multimedia tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    tzdata \
     mediainfo \
     handbrake-cli \
     mkvtoolnix \
@@ -19,14 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-# setup permissions
-RUN groupadd -g 1000 mygroup && \
-    useradd -u 1000 -g mygroup -m myuser
+# The daemon must run as the owner of the media library: it replaces files in
+# place and cannot chown. Match PUID/PGID to the user who owns the media.
+ARG PUID=1000
+ARG PGID=1000
+RUN groupadd -g ${PGID} app && \
+    useradd -u ${PUID} -g app -m app
 
 WORKDIR /app
-RUN mkdir storage && chown myuser:mygroup storage
-
-USER myuser
-COPY --from=builder --chown=myuser:mygroup /video-optimizer-daemon .
+USER app
+COPY --from=builder --chown=app:app /video-optimizer-daemon .
 
 CMD ["./video-optimizer-daemon"]

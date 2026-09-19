@@ -3,13 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -24,8 +22,18 @@ const (
 	envPromptMode    = "PROMPT_MODE"
 	envMediaList     = "MEDIA_LIST_PATH"
 	envTempDirPath   = "TEMP_DIR"
+	envStatePath     = "STATE_PATH"
+	envLogLevel      = "LOG_LEVEL"
+	envMinAge        = "MIN_AGE"
+	envWorkHours     = "WORK_HOURS"
+	envPreset1080p   = "PRESET_1080P"
+	envPreset2160p   = "PRESET_2160P"
 
-	defaultMediaDir = "/media"
+	defaultMediaDir    = "/media"
+	defaultMinAge      = 30 * 24 * time.Hour
+	defaultPreset1080p = "slow-1080p-20"
+	defaultPreset2160p = "slow-2160p-20"
+	stateFileName      = ".video-optimizer-state.json"
 
 	// retryDelay is the pause after an empty scan or a failed task. A successful
 	// task is followed by the next scan immediately.
@@ -41,7 +49,6 @@ var (
 		}
 		return ret
 	}()
-	alreadyProcessedFiles = make(map[string]struct{})
 
 	// sidecarExtensions define list of file extensions that should be merged into the final output if they exist alongside the original video file
 	sidecarExtensions = map[string]bool{
@@ -57,6 +64,12 @@ type Config struct {
 	MediaListPath        string
 	HandbrakePresetsPath string
 	TempDirPath          string
+	StatePath            string
+	LogLevel             string
+	MinAge               time.Duration
+	WorkHours            string
+	Preset1080p          string
+	Preset2160p          string
 }
 
 type MediaInfoOutput struct {
@@ -97,12 +110,27 @@ func defaultHandbrakeConf() string {
 	return filepath.Join(home, ".config", "ghb", "presets.json")
 }
 
-func main() {
-	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before replacing original files")
+// defaultStatePath keeps the state next to the data it describes: inside the
+// media directory, or beside the media list.
+func defaultStatePath(cfg Config) string {
+	if cfg.MediaListPath != "" {
+		return filepath.Join(filepath.Dir(cfg.MediaListPath), stateFileName)
+	}
+	return filepath.Join(cfg.MediaDir, stateFileName)
+}
+
+func loadConfig() (Config, error) {
+	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before starting a conversion and before replacing original files")
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
 	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf(), "Path to HandBrake presets JSON file")
 	mediaListPtr := flag.String("media-list", "", "Path to a file with video paths, one per line; replaces directory scanning")
 	tmpDirPtr := flag.String("tmp", os.TempDir(), "Directory to use for temporary files")
+	statePtr := flag.String("state", "", "Path to the JSON state file (default: "+stateFileName+" in the media dir, or next to the media list)")
+	logLevelPtr := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	minAgePtr := flag.Duration("min-age", defaultMinAge, "Minimum time since last modification for a file to be eligible")
+	workHoursPtr := flag.String("work-hours", "", "Local time window for encoding, e.g. 23:00-07:00 (default: always)")
+	preset1080Ptr := flag.String("preset-1080p", defaultPreset1080p, "HandBrake preset for sources up to 1080p; CRF is passed separately with -q")
+	preset2160Ptr := flag.String("preset-2160p", defaultPreset2160p, "HandBrake preset for sources above 1080p; CRF is passed separately with -q")
 	flag.Parse()
 
 	cfg := Config{
@@ -111,30 +139,84 @@ func main() {
 		MediaListPath:        *mediaListPtr,
 		HandbrakePresetsPath: *handbrakeConfPtr,
 		TempDirPath:          *tmpDirPtr,
+		StatePath:            *statePtr,
+		LogLevel:             *logLevelPtr,
+		MinAge:               *minAgePtr,
+		WorkHours:            *workHoursPtr,
+		Preset1080p:          *preset1080Ptr,
+		Preset2160p:          *preset2160Ptr,
 	}
-	if os.Getenv(envMediaDir) != "" {
-		cfg.MediaDir = os.Getenv(envMediaDir)
+
+	envString := func(dst *string, name string) {
+		if v := os.Getenv(name); v != "" {
+			*dst = v
+		}
 	}
-	if os.Getenv(envHandbrakeConf) != "" {
-		cfg.HandbrakePresetsPath = os.Getenv(envHandbrakeConf)
-	}
-	if os.Getenv(envPromptMode) != "" && cfg.PromptMode == false {
+	envString(&cfg.MediaDir, envMediaDir)
+	envString(&cfg.HandbrakePresetsPath, envHandbrakeConf)
+	envString(&cfg.MediaListPath, envMediaList)
+	envString(&cfg.TempDirPath, envTempDirPath)
+	envString(&cfg.StatePath, envStatePath)
+	envString(&cfg.LogLevel, envLogLevel)
+	envString(&cfg.WorkHours, envWorkHours)
+	envString(&cfg.Preset1080p, envPreset1080p)
+	envString(&cfg.Preset2160p, envPreset2160p)
+	if os.Getenv(envPromptMode) != "" && !cfg.PromptMode {
 		envVal, _ := strconv.ParseBool(os.Getenv(envPromptMode))
 		cfg.PromptMode = envVal
 	}
-	if os.Getenv(envMediaList) != "" {
-		cfg.MediaListPath = os.Getenv(envMediaList)
-	}
-	if os.Getenv(envTempDirPath) != "" {
-		cfg.TempDirPath = os.Getenv(envTempDirPath)
+	if v := os.Getenv(envMinAge); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("%s: %w", envMinAge, err)
+		}
+		cfg.MinAge = d
 	}
 
 	if cfg.HandbrakePresetsPath == "" {
-		log.Fatalf("handbrake presets path is not set: pass -handbrake-conf or %s (home directory could not be determined)", envHandbrakeConf)
+		return cfg, fmt.Errorf("handbrake presets path is not set: pass -handbrake-conf or %s (home directory could not be determined)", envHandbrakeConf)
+	}
+	if cfg.StatePath == "" {
+		cfg.StatePath = defaultStatePath(cfg)
+	}
+	return cfg, nil
+}
+
+func setupLogger(level string) error {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return fmt.Errorf("log level %q: %w", level, err)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+	return nil
+}
+
+func main() {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	if err := setupLogger(cfg.LogLevel); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
 	}
 
-	log.Println("Starting Video Optimizer Daemon...")
-	log.Printf("Configuration: %+v", cfg)
+	slog.Info("Starting Video Optimizer Daemon")
+	slog.Info("Configuration", "config", fmt.Sprintf("%+v", cfg))
+
+	window, err := parseWorkWindow(cfg.WorkHours)
+	if err != nil {
+		slog.Error("Invalid configuration", "err", err)
+		os.Exit(1)
+	}
+	state, err := loadState(cfg.StatePath)
+	if err != nil {
+		slog.Error("Cannot load state", "err", err)
+		os.Exit(1)
+	}
+
+	lowerPriority()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -142,22 +224,41 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		log.Println("Shutting down...")
+		slog.Info("Shutting down")
 		cancel()
 	}()
 
+	d := &Daemon{cfg: cfg, state: state, window: window}
+	d.loop(ctx)
+
+	if err := state.Flush(); err != nil {
+		slog.Error("Failed to flush state on shutdown", "err", err)
+	}
+}
+
+type Daemon struct {
+	cfg    Config
+	state  *State
+	window *workWindow
+}
+
+func (d *Daemon) loop(ctx context.Context) {
 	for ctx.Err() == nil {
-		processed, err := processVideoFiles(ctx, cfg)
+		if !d.window.waitUntilOpen(ctx) {
+			return
+		}
+
+		processed, err := d.processNext(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		switch {
 		case err != nil:
-			log.Println("Error during encoding: ", err)
+			slog.Error("Task failed", "err", err)
 		case processed:
 			continue
 		default:
-			log.Printf("No eligible files found, next scan in %v", retryDelay)
+			slog.Info("No eligible files found", "next_scan_in", retryDelay)
 		}
 
 		select {
@@ -168,138 +269,52 @@ func main() {
 	}
 }
 
-// processVideoFiles picks one candidate and runs the conversion task on it. It
-// returns false when nothing was eligible. The candidate is marked as processed
-// whatever the outcome (success, skip, decline, error): a broken file that is
-// retried every scan blocks the whole queue.
-func processVideoFiles(ctx context.Context, cfg Config) (bool, error) {
-	targetFile, err := findTargetVideoFile(ctx, cfg)
+// processNext walks the candidate list until one file actually needs encoding,
+// runs that one task and returns. Every file it looked at is recorded in the
+// state whatever the outcome: a broken file retried every scan blocks the queue.
+func (d *Daemon) processNext(ctx context.Context) (bool, error) {
+	candidates, err := findCandidates(ctx, d.cfg, d.state)
 	if err != nil {
+		return false, fmt.Errorf("search files: %w", err)
+	}
+	defer func() {
+		if err := d.state.Flush(); err != nil {
+			slog.Error("Failed to flush state", "err", err)
+		}
+	}()
+
+	for _, path := range candidates {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		return false, fmt.Errorf("search files: %w", err)
-	}
 
-	if targetFile == "" {
-		return false, nil
-	}
-
-	log.Printf("Found target candidate: %s", targetFile)
-
-	task := &VideoConvertTask{
-		cfg:        cfg,
-		targetPath: targetFile,
-	}
-
-	err = task.Run(ctx)
-	if ctx.Err() != nil {
-		// Shutdown interrupted the task; leave it eligible for the next start.
-		return false, ctx.Err()
-	}
-	alreadyProcessedFiles[targetFile] = struct{}{}
-	return true, err
-}
-
-func findTargetVideoFile(ctx context.Context, cfg Config) (string, error) {
-	if cfg.MediaListPath != "" {
-		return findVideoFromList(ctx, cfg)
-	}
-	return findVideoFromDirectory(ctx, cfg)
-}
-
-func findVideoFromList(ctx context.Context, cfg Config) (string, error) {
-	file, err := os.Open(cfg.MediaListPath)
-	defer closeCloser(file)
-	if err != nil {
-		return "", fmt.Errorf("open media list: %w", err)
-	}
-
-	log.Println("Reading media list from:", cfg.MediaListPath)
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		path := strings.TrimSpace(scanner.Text())
-		if path == "" {
-			continue
-		}
-		if _, ok := alreadyProcessedFiles[path]; ok {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
-		}
-
-		mediaInfo, err := getMediaInfo(path)
+		info, err := getMediaInfo(path)
 		if err != nil {
-			// One unreadable entry must not stall the whole list forever.
-			log.Printf("Skipping '%s': get mediainfo: %v", path, err)
-			alreadyProcessedFiles[path] = struct{}{}
+			slog.Warn("Skipping file: mediainfo failed", "path", path, "err", err)
+			d.state.Record(path, StateEntry{Outcome: OutcomeFailed, Error: "mediainfo: " + err.Error()})
+			continue
+		}
+		if isAlreadyOptimized(info) {
+			slog.Debug("Skipping file: already optimized", "path", path)
+			d.state.Record(path, StateEntry{Outcome: OutcomeSkippedHEVC})
 			continue
 		}
 
-		if isAlreadyOptimized(mediaInfo) {
-			alreadyProcessedFiles[path] = struct{}{}
-			continue
-		}
-
-		log.Println("Found valid file in media list: ", path)
-
-		return path, nil
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read media list: %w", err)
-	}
-
-	return "", nil
-}
-
-func findVideoFromDirectory(ctx context.Context, cfg Config) (string, error) {
-	if ctx.Err() != nil {
-		return "", ctx.Err()
-	}
-
-	log.Println("Scanning for largest eligible video file...")
-
-	var largestFile string
-	var largestSize int64
-	// Recomputed per scan: a daemon-wide constant would freeze at start time
-	// and newer files would never become eligible.
-	threshold := time.Now().AddDate(0, -1, 0)
-
-	err := filepath.Walk(cfg.MediaDir, func(path string, info os.FileInfo, err error) error {
+		slog.Info("Found target candidate", "path", path)
+		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, mediaInfo: info, window: d.window}
+		entry, err := task.Run(ctx)
 		if ctx.Err() != nil {
-			return ctx.Err()
+			// Shutdown interrupted the task; leave it eligible for the next start.
+			return false, ctx.Err()
 		}
-
-		if err != nil || info.IsDir() {
-			return nil
+		if err != nil {
+			entry = StateEntry{Outcome: OutcomeFailed, Error: err.Error()}
 		}
+		d.state.Record(path, entry)
+		return true, err
+	}
 
-		if _, ok := alreadyProcessedFiles[path]; ok {
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		if _, ok := validVideoExtensions[ext]; !ok {
-			return nil
-		}
-
-		if info.ModTime().Before(threshold) {
-			if info.Size() > largestSize {
-				largestSize = info.Size()
-				largestFile = path
-			}
-		}
-		return nil
-	})
-
-	return largestFile, err
+	return false, nil
 }
 
 func isAlreadyOptimized(info *MediaInfoOutput) bool {
@@ -328,35 +343,10 @@ func isAlreadyOptimized(info *MediaInfoOutput) bool {
 	return false
 }
 
-func getMediaInfo(path string) (*MediaInfoOutput, error) {
-	cmd := exec.Command("mediainfo", "--fullscan", "--Output=JSON", path)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var data MediaInfoOutput
-	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
-	cmd := exec.Command("mkvmerge", "-J", path)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("mkvmerge -J %s: %w", path, err)
-	}
-
-	var data MkvMergeOutput
-	if err := json.Unmarshal(out, &data); err != nil {
-		return nil, fmt.Errorf("mkvmerge: unmarshal JSON '%s': %w", string(out), err)
-	}
-	return &data, nil
-}
-
-func selectHandbrakePreset(info *MediaInfoOutput) string {
+// selectEncoding picks the preset family by resolution and the CRF from the
+// source's resolution and bitrate. The CRF is passed to HandBrake with -q, so
+// the preset itself only needs to describe the encoder settings.
+func selectEncoding(cfg Config, info *MediaInfoOutput) (preset string, crf int) {
 	width := 0
 	height := 0
 	bitrate := 0
@@ -369,12 +359,12 @@ func selectHandbrakePreset(info *MediaInfoOutput) string {
 		}
 	}
 
-	mode := "slow"
-	resolution := "1080p"
+	preset = cfg.Preset1080p
 	quality := 20
 
-	if width > 1920 || height > 1080 {
-		resolution = "2160p"
+	uhd := width > 1920 || height > 1080
+	if uhd {
+		preset = cfg.Preset2160p
 		if width >= 2100 || height >= 1200 {
 			quality++
 		}
@@ -401,14 +391,13 @@ func selectHandbrakePreset(info *MediaInfoOutput) string {
 		}
 	}
 
-	switch resolution {
-	case "2160p":
+	if uhd {
 		quality = clamp(quality, 17, 21)
-	case "1080p":
+	} else {
 		quality = clamp(quality, 14, 21)
 	}
 
-	return strings.Join([]string{mode, resolution, strconv.Itoa(quality)}, "-")
+	return preset, quality
 }
 
 func clamp(val, min, max int) int {
@@ -419,26 +408,6 @@ func clamp(val, min, max int) int {
 		return max
 	}
 	return val
-}
-
-func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset string) error {
-	args := []string{
-		"-n", "19",
-		"HandBrakeCLI",
-		"--preset-import-file", cfg.HandbrakePresetsPath,
-		"-Z", preset,
-		"-i", input,
-		"-o", output,
-		"--format", "mkv",
-	}
-
-	log.Println("Running HandbrakeCLI command: nice", args)
-
-	cmd := exec.CommandContext(ctx, "nice", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
 }
 
 // copyFile is the cross-device fallback for os.Rename. The original is deleted
@@ -463,7 +432,7 @@ func copyFile(src, dst string) (err error) {
 	defer func() {
 		if err != nil {
 			if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
-				log.Printf("Failed to remove partial copy %s: %v", dst, rmErr)
+				slog.Warn("Failed to remove partial copy", "path", dst, "err", rmErr)
 			}
 		}
 	}()
@@ -516,13 +485,13 @@ func formatStr(s string) string {
 	return b.String()
 }
 
-func getFileSize(p string) string {
+func fileSize(p string) int64 {
 	info, err := os.Stat(p)
 	if err != nil {
-		log.Println("Error getting file size:", err)
-		return "N/A"
+		slog.Warn("Failed to stat file", "path", p, "err", err)
+		return 0
 	}
-	return formatNum(info.Size())
+	return info.Size()
 }
 
 func promptConfirm(ctx context.Context) (bool, error) {
@@ -548,6 +517,7 @@ func promptConfirm(ctx context.Context) (bool, error) {
 	}
 
 	response = strings.TrimSpace(strings.ToLower(response))
+	slog.Debug("Prompt answered", "response", response)
 	return response == "y" || response == "yes", nil
 }
 
@@ -559,7 +529,7 @@ func closeCloser(c io.Closer) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == "runtime error: invalid memory address or nil pointer dereference" {
-				log.Printf("Attempted to close a nil pointer: %v", r)
+				slog.Debug("Attempted to close a nil pointer", "recovered", r)
 				return
 			}
 			panic(r)
@@ -567,6 +537,6 @@ func closeCloser(c io.Closer) {
 	}()
 
 	if err := c.Close(); err != nil {
-		log.Printf("Failed to close: %v", err)
+		slog.Warn("Failed to close", "err", err)
 	}
 }

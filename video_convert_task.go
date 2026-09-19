@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -24,6 +23,8 @@ const maxDurationDrift = 10 * time.Second
 type VideoConvertTask struct {
 	cfg        Config
 	targetPath string
+	mediaInfo  *MediaInfoOutput
+	window     *workWindow
 	tempFiles  []string
 }
 
@@ -32,39 +33,39 @@ func (t *VideoConvertTask) CleanUp() {
 		err := os.Remove(f)
 		switch {
 		case err == nil:
-			log.Printf("Removed temp file: %s", f)
+			slog.Debug("Removed temp file", "path", f)
 		case os.IsNotExist(err):
 			// After a successful rename the temp file already lives at the
 			// final path, so its absence here is the normal outcome.
 		default:
-			log.Printf("Failed to remove temp file %s: %v", f, err)
+			slog.Warn("Failed to remove temp file", "path", f, "err", err)
 		}
 	}
 }
 
-func (t *VideoConvertTask) Run(ctx context.Context) error {
-	origInfo, err := getMediaInfo(t.targetPath)
-	if err != nil {
-		return fmt.Errorf("get mediainfo: %w", err)
+// Run converts the target and returns what to record about it. The caller
+// decides what to do with a returned error; it is never "done" then.
+func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
+	origInfo := t.mediaInfo
+	if origInfo == nil {
+		var err error
+		origInfo, err = getMediaInfo(t.targetPath)
+		if err != nil {
+			return StateEntry{}, fmt.Errorf("get mediainfo: %w", err)
+		}
 	}
 
+	sizeBefore := fileSize(t.targetPath)
 	for _, track := range origInfo.Media.Tracks {
 		if strings.EqualFold(track.Type, "video") {
-			bitrate := formatStr(track.Bitrate)
-			log.Printf("Format: %s, CodecID: %s, %sx%sp %s bps", track.Format, track.CodecID, track.Width, track.Height, bitrate)
+			slog.Info("Source video", "path", t.targetPath, "format", track.Format, "codec", track.CodecID,
+				"resolution", track.Width+"x"+track.Height, "bitrate", track.Bitrate, "size", sizeBefore)
 			break
 		}
 	}
 
-	log.Printf("File Size: %s", getFileSize(t.targetPath))
-
-	if isAlreadyOptimized(origInfo) {
-		log.Println("File already optimized, skipping.")
-		return nil
-	}
-
-	preset := selectHandbrakePreset(origInfo)
-	log.Printf("Selected Preset: %s", preset)
+	preset, crf := selectEncoding(t.cfg, origInfo)
+	slog.Info("Selected encoding", "preset", preset, "crf", crf)
 
 	if t.cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
@@ -72,87 +73,92 @@ func (t *VideoConvertTask) Run(ctx context.Context) error {
 		fmt.Print("Start conversion? (y/n): ")
 		confirmed, err := promptConfirm(ctx)
 		if err != nil {
-			return err
+			return StateEntry{}, err
 		}
 		if !confirmed {
-			log.Printf("Conversion was declined")
-			return nil
+			slog.Info("Conversion declined", "path", t.targetPath)
+			return StateEntry{Outcome: OutcomeDeclined, SizeBefore: sizeBefore}, nil
 		}
 	}
 
 	encodedPath, err := t.createTempFile("video_opt_*.mkv")
 	if err != nil {
-		return fmt.Errorf("creating video_opt: %w", err)
+		return StateEntry{}, fmt.Errorf("creating video_opt: %w", err)
 	}
-	log.Println("temp file created:", encodedPath)
 
 	defer t.CleanUp()
 
-	log.Println("Starting HandBrake conversion...")
-	if err := runHandbrakeCLI(ctx, t.cfg, t.targetPath, encodedPath, preset); err != nil {
-		return fmt.Errorf("run handbrake: %w", err)
+	slog.Info("Starting HandBrake conversion", "path", t.targetPath)
+	started := time.Now()
+	if err := runHandbrakeCLI(ctx, t.cfg, t.targetPath, encodedPath, preset, crf, t.window); err != nil {
+		return StateEntry{}, fmt.Errorf("run handbrake: %w", err)
 	}
-	log.Println("HandBrake finished successfully.")
+	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))
 
-	log.Println("Checking audio tracks on converted file...")
+	slog.Debug("Checking audio tracks on converted file", "path", encodedPath)
 	encodedInfo, err := getMkvMergeInfo(encodedPath)
 	if err != nil {
-		return err
+		return StateEntry{}, err
 	}
 	keepAudio := audioTracksToKeep(encodedInfo)
 
 	sidecars, err := findSidecarFiles(t.targetPath)
 	if err != nil {
-		return fmt.Errorf("find sidecar files: %w", err)
+		return StateEntry{}, fmt.Errorf("find sidecar files: %w", err)
 	}
 	if len(sidecars) > 0 {
-		log.Printf("Found %d sidecar file(s) to merge: %v", len(sidecars), sidecars)
+		slog.Info("Sidecar files will be merged", "count", len(sidecars), "files", sidecars)
 	}
 
 	finalPath, err := t.createTempFile("video_final_*.mkv")
 	if err != nil {
-		return fmt.Errorf("creating video_final: %w", err)
+		return StateEntry{}, fmt.Errorf("creating video_final: %w", err)
 	}
 
 	args := mkvmergeArgs(finalPath, encodedPath, t.targetPath, keepAudio, sidecars)
-	log.Println("Running mkvmerge to assemble final file: mkvmerge", args)
 	if err := runMkvmerge(ctx, args); err != nil {
-		return fmt.Errorf("mkvmerge final mux: %w", err)
+		return StateEntry{}, fmt.Errorf("mkvmerge final mux: %w", err)
 	}
-	log.Println("Final mux successful:", finalPath)
+	slog.Debug("Final mux successful", "path", finalPath)
 
 	finalInfo, err := getMediaInfo(finalPath)
 	if err != nil {
-		return fmt.Errorf("get mediainfo of converted file: %w", err)
+		return StateEntry{}, fmt.Errorf("get mediainfo of converted file: %w", err)
 	}
 	if err := checkDuration(origInfo, finalInfo); err != nil {
-		return fmt.Errorf("verify converted file: %w", err)
+		return StateEntry{}, fmt.Errorf("verify converted file: %w", err)
 	}
+	sizeAfter := fileSize(finalPath)
 
 	if t.cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
 		fmt.Printf("Original: %s\n", t.targetPath)
-		fmt.Printf("Original size: %s\n", getFileSize(t.targetPath))
+		fmt.Printf("Original size: %s\n", formatNum(sizeBefore))
 		fmt.Printf("New File: %s\n", finalPath)
-		fmt.Printf("New size: %s\n", getFileSize(finalPath))
+		fmt.Printf("New size: %s\n", formatNum(sizeAfter))
 		fmt.Print("Replace original file? (y/n): ")
 		confirmed, err := promptConfirm(ctx)
 		if err != nil {
-			return err
+			return StateEntry{}, err
 		}
 		if !confirmed {
-			log.Printf("File replacement cancelled")
-			return nil
+			slog.Info("File replacement declined", "path", t.targetPath)
+			return StateEntry{Outcome: OutcomeDeclined, SizeBefore: sizeBefore}, nil
 		}
 	}
 
 	if err := t.replaceOriginalWithEncoded(finalPath, sidecars); err != nil {
-		return fmt.Errorf("replace encoded file: %w", err)
+		return StateEntry{}, fmt.Errorf("replace encoded file: %w", err)
 	}
 
-	log.Println("Encoding completed successfully for:", t.targetPath)
+	savedPct := 0.0
+	if sizeBefore > 0 {
+		savedPct = 100 * float64(sizeBefore-sizeAfter) / float64(sizeBefore)
+	}
+	slog.Info("Encoding completed", "path", t.targetPath, "size_before", sizeBefore, "size_after", sizeAfter,
+		"saved_percent", fmt.Sprintf("%.1f", savedPct))
 
-	return nil
+	return StateEntry{Outcome: OutcomeDone, SizeBefore: sizeBefore, SizeAfter: sizeAfter}, nil
 }
 
 // findSidecarFiles returns subtitle and audio files that sit next to targetPath
@@ -198,7 +204,7 @@ func audioTracksToKeep(info *MkvMergeOutput) []string {
 			lang = "und"
 		}
 		if seenLangs[lang] {
-			log.Printf("Duplicate audio language found: %s. Dropping track ID %d.", lang, track.ID)
+			slog.Info("Dropping duplicate audio track", "language", lang, "track_id", track.ID)
 			continue
 		}
 		seenLangs[lang] = true
@@ -220,22 +226,6 @@ func mkvmergeArgs(output, encoded, original string, keepAudio, sidecars []string
 	args = append(args, "--no-video", "--no-audio", original)
 	args = append(args, sidecars...)
 	return args
-}
-
-func runMkvmerge(ctx context.Context, args []string) error {
-	cmd := exec.CommandContext(ctx, "mkvmerge", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	err := cmd.Run()
-	// mkvmerge exits with 1 when the output was written but warnings were
-	// printed; only 2 means the mux actually failed.
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		log.Println("mkvmerge finished with warnings, see output above")
-		return nil
-	}
-	return err
 }
 
 func durationSeconds(info *MediaInfoOutput) (float64, error) {
@@ -264,7 +254,7 @@ func checkDuration(orig, converted *MediaInfoOutput) error {
 		return fmt.Errorf("duration mismatch: original %.1fs, converted %.1fs, drift %v exceeds %v",
 			origDur, convDur, drift.Round(time.Millisecond), maxDurationDrift)
 	}
-	log.Printf("Duration check passed: original %.1fs, converted %.1fs", origDur, convDur)
+	slog.Debug("Duration check passed", "original_s", origDur, "converted_s", convDur)
 	return nil
 }
 
@@ -342,16 +332,16 @@ func (t *VideoConvertTask) replaceOriginalWithEncoded(finalPath string, sidecars
 		return fmt.Errorf("stat original file: %w", err)
 	}
 
-	log.Printf("Replacing %s with optimized version with name %s", t.targetPath, newFilePath)
+	slog.Info("Replacing original with optimized version", "original", t.targetPath, "new", newFilePath)
 
 	if err := os.Rename(finalPath, newFilePath); err != nil {
-		log.Println("Rename failed, attempting copy and delete:", err)
+		slog.Debug("Rename failed, attempting copy and delete", "err", err)
 		if err := copyFile(finalPath, newFilePath); err != nil {
 			return fmt.Errorf("replace original file: %w", err)
 		}
-		log.Println("File copied successfully.")
+		slog.Debug("File copied successfully", "path", newFilePath)
 	} else {
-		log.Println("File renamed successfully.")
+		slog.Debug("File renamed successfully", "path", newFilePath)
 	}
 
 	// os.CreateTemp hardcodes 0600; a media server running as another user
@@ -359,18 +349,18 @@ func (t *VideoConvertTask) replaceOriginalWithEncoded(finalPath string, sidecars
 	if err := os.Chmod(newFilePath, origStat.Mode().Perm()); err != nil {
 		return fmt.Errorf("copy permissions to new file: %w", err)
 	}
-	log.Printf("Applied original permissions %v to %s", origStat.Mode().Perm(), newFilePath)
+	slog.Debug("Applied original permissions", "mode", origStat.Mode().Perm().String(), "path", newFilePath)
 
 	if err := os.Remove(t.targetPath); err != nil {
 		return fmt.Errorf("remove original file: %w", err)
 	}
-	log.Println("Original file removed successfully (", t.targetPath, ")")
+	slog.Debug("Original file removed", "path", t.targetPath)
 
 	for _, sf := range sidecars {
 		if err := os.Remove(sf); err != nil {
-			log.Printf("Failed to remove merged sidecar file %s: %v", sf, err)
+			slog.Warn("Failed to remove merged sidecar file", "path", sf, "err", err)
 		} else {
-			log.Printf("Removed merged sidecar file: %s", sf)
+			slog.Debug("Removed merged sidecar file", "path", sf)
 		}
 	}
 
@@ -385,5 +375,6 @@ func (t *VideoConvertTask) createTempFile(prefix string) (string, error) {
 	}
 	path := f.Name()
 	t.tempFiles = append(t.tempFiles, path)
+	slog.Debug("Temp file created", "path", path)
 	return path, nil
 }

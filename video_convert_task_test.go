@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -236,8 +236,9 @@ func TestCheckDuration(t *testing.T) {
 
 func TestCleanUpIgnoresMissingTempFile(t *testing.T) {
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
 
 	dir := t.TempDir()
 	present := filepath.Join(dir, "present.mkv")

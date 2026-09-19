@@ -1,18 +1,39 @@
+# Required in .env: MEDIA_DIR, TEMP_DIR.
+# Optional: PUID, PGID (owner of the media files, default 1000:1000),
+# MEDIA_LIST_PATH, STATE_PATH, GHB_DIR (directory with HandBrake presets.json,
+# default ~/.config/ghb), LOG_LEVEL, MIN_AGE, WORK_HOURS, PRESET_1080P,
+# PRESET_2160P.
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
     cap_add:
       - SYS_NICE # for set_mempolicy call
     container_name: video-optimizer-daemon
-    user: "1000:1000"
+    user: "${PUID:-1000}:${PGID:-1000}"
     volumes:
       - ${MEDIA_DIR}:${MEDIA_DIR}
       - ${TEMP_DIR}:${TEMP_DIR}
-      # path to your handbrake presets.json dir like ~/.config/ghb
-      #- /home/user/.config/ghb/:/ghb
+      # Media list, if used. /dev/null is a harmless placeholder when unset.
+      - ${MEDIA_LIST_PATH:-/dev/null}:${MEDIA_LIST_PATH:-/dev/null}
+      # HandBrake presets: the daemon reads /ghb/presets.json.
+      - ${GHB_DIR:-${HOME}/.config/ghb}:/ghb:ro
     environment:
       - MEDIA_DIR=${MEDIA_DIR}
       - TEMP_DIR=${TEMP_DIR}
-      - MEDIA_LIST_PATH=${MEDIA_LIST_PATH}
+      - MEDIA_LIST_PATH=${MEDIA_LIST_PATH:-}
+      # A single-file bind mount has no writable parent inside the container,
+      # so the state lives in the media directory unless overridden.
+      - STATE_PATH=${STATE_PATH:-${MEDIA_DIR}/.video-optimizer-state.json}
       - HANDBRAKE_CONF=/ghb/presets.json
+      - LOG_LEVEL=${LOG_LEVEL:-}
+      - MIN_AGE=${MIN_AGE:-}
+      - WORK_HOURS=${WORK_HOURS:-}
+      - PRESET_1080P=${PRESET_1080P:-}
+      - PRESET_2160P=${PRESET_2160P:-}
+      # The work window is in the container's local time.
+      - TZ=${TZ:-}
     restart: always
