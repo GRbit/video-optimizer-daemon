@@ -101,7 +101,11 @@ mkvmerge -o final.mkv [--audio-tracks ids] --no-subtitles --no-chapters --no-att
 Before the original is touched, the duration of the assembled file (as
 reported by mediainfo) must be within 10 seconds of the original's. If it is
 not, the task fails, the original stays and the file is recorded as `failed`.
-File size is deliberately not checked.
+
+The assembled file must also be at least 10% smaller than the original.
+Otherwise the original is kept and the file is recorded as `small_gain`: a
+re-encode always adds artifacts, and a few percent of disk space is not worth
+them. This check runs before the replacement prompt in prompt mode.
 
 Then the daemon:
 
@@ -129,22 +133,15 @@ the media list file when one is used. Override with `-state` / `STATE_PATH`.
 
 ```json
 {
-  "/media/Movie.mkv": {
-    "outcome": "done",
-    "time": "2026-09-21T02:14:07+02:00",
-    "size_before": 8123456789,
-    "size_after": 3456789012
-  },
-  "/media/Other.mkv": {
-    "outcome": "failed",
-    "time": "2026-09-21T03:01:00+02:00",
-    "error": "run handbrake: exit status 1"
-  }
+  "/media/Movie.mkv": "done",
+  "/media/Series/S01E01.mkv": "skipped_hevc",
+  "/media/Other.mkv": "failed: run handbrake: exit status 1"
 }
 ```
 
-Outcomes are `done`, `skipped_hevc`, `declined` (refused in prompt mode) and
-`failed` (with the error text). A file with an entry is never offered again.
+Outcomes are `done`, `skipped_hevc`, `declined` (refused in prompt mode),
+`small_gain` (converted, but less than 10% smaller, original kept) and
+`failed: <error text>`. A file with an entry is never offered again.
 To retry a file, delete its entry; the file is written with indentation for
 exactly that purpose. Entries for files that no longer exist are harmless.
 

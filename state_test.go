@@ -26,7 +26,7 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Errorf("flush with no changes must not create the file, stat err = %v", err)
 	}
 
-	s.Record("/media/a.mkv", StateEntry{Outcome: OutcomeDone, SizeBefore: 100, SizeAfter: 40})
+	s.Record("/media/a.mkv", StateEntry{Outcome: OutcomeDone})
 	s.Record("/media/b.mkv", StateEntry{Outcome: OutcomeFailed, Error: "boom"})
 	s.Record("/media/c.mkv", StateEntry{Outcome: OutcomeDeclined})
 	if err := s.Flush(); err != nil {
@@ -39,6 +39,11 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "\n  ") {
 		t.Errorf("state file should be indented for hand editing:\n%s", raw)
+	}
+	for _, want := range []string{`"/media/a.mkv": "done"`, `"/media/b.mkv": "failed: boom"`, `"/media/c.mkv": "declined"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("state file should contain %s:\n%s", want, raw)
+		}
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -60,7 +65,7 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Fatalf("reloaded %d entries, want 3", reloaded.Len())
 	}
 	a, ok := reloaded.Get("/media/a.mkv")
-	if !ok || a.Outcome != OutcomeDone || a.SizeBefore != 100 || a.SizeAfter != 40 || a.Time.IsZero() {
+	if !ok || a.Outcome != OutcomeDone || a.Error != "" {
 		t.Errorf("entry a = %+v, ok=%v", a, ok)
 	}
 	b, _ := reloaded.Get("/media/b.mkv")

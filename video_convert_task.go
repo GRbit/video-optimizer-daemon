@@ -20,6 +20,10 @@ import (
 // original before the result is treated as truncated and the original is kept.
 const maxDurationDrift = 10 * time.Second
 
+// minSavingsPercent is the smallest size reduction worth replacing the
+// original: every re-encode adds artifacts, and below this the trade is bad.
+const minSavingsPercent = 10.0
+
 type VideoConvertTask struct {
 	cfg        Config
 	targetPath string
@@ -77,7 +81,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		}
 		if !confirmed {
 			slog.Info("Conversion declined", "path", t.targetPath)
-			return StateEntry{Outcome: OutcomeDeclined, SizeBefore: sizeBefore}, nil
+			return StateEntry{Outcome: OutcomeDeclined}, nil
 		}
 	}
 
@@ -129,6 +133,13 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		return StateEntry{}, fmt.Errorf("verify converted file: %w", err)
 	}
 	sizeAfter := fileSize(finalPath)
+	if !checkSavings(sizeBefore, sizeAfter) {
+		slog.Info("Size gain too small, keeping original", "path", t.targetPath,
+			"size_before", sizeBefore, "size_after", sizeAfter,
+			"saved_percent", fmt.Sprintf("%.1f", savingsPercent(sizeBefore, sizeAfter)),
+			"min_percent", minSavingsPercent)
+		return StateEntry{Outcome: OutcomeSmallGain}, nil
+	}
 
 	if t.cfg.PromptMode {
 		fmt.Printf("\n--- ACTION REQUIRED ---\n")
@@ -143,7 +154,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		}
 		if !confirmed {
 			slog.Info("File replacement declined", "path", t.targetPath)
-			return StateEntry{Outcome: OutcomeDeclined, SizeBefore: sizeBefore}, nil
+			return StateEntry{Outcome: OutcomeDeclined}, nil
 		}
 	}
 
@@ -151,14 +162,27 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		return StateEntry{}, fmt.Errorf("replace encoded file: %w", err)
 	}
 
-	savedPct := 0.0
-	if sizeBefore > 0 {
-		savedPct = 100 * float64(sizeBefore-sizeAfter) / float64(sizeBefore)
-	}
 	slog.Info("Encoding completed", "path", t.targetPath, "size_before", sizeBefore, "size_after", sizeAfter,
-		"saved_percent", fmt.Sprintf("%.1f", savedPct))
+		"saved_percent", fmt.Sprintf("%.1f", savingsPercent(sizeBefore, sizeAfter)))
 
-	return StateEntry{Outcome: OutcomeDone, SizeBefore: sizeBefore, SizeAfter: sizeAfter}, nil
+	return StateEntry{Outcome: OutcomeDone}, nil
+}
+
+func savingsPercent(sizeBefore, sizeAfter int64) float64 {
+	if sizeBefore <= 0 {
+		return 0
+	}
+	return 100 * float64(sizeBefore-sizeAfter) / float64(sizeBefore)
+}
+
+// checkSavings reports whether the converted file is small enough to replace
+// the original. An unknown original size counts as "not enough": with no
+// number to compare against, keeping the original is the safe choice.
+func checkSavings(sizeBefore, sizeAfter int64) bool {
+	if sizeBefore <= 0 {
+		return false
+	}
+	return savingsPercent(sizeBefore, sizeAfter) >= minSavingsPercent
 }
 
 // findSidecarFiles returns subtitle and audio files that sit next to targetPath

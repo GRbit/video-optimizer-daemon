@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
+	"strings"
 )
 
 type Outcome string
@@ -17,17 +17,43 @@ const (
 	OutcomeSkippedHEVC Outcome = "skipped_hevc"
 	OutcomeDeclined    Outcome = "declined"
 	OutcomeFailed      Outcome = "failed"
+	// OutcomeSmallGain: the encode worked but shrank the file too little to be
+	// worth the generation loss, so the original was kept.
+	OutcomeSmallGain Outcome = "small_gain"
 )
 
 // StateEntry is what the daemon remembers about one file. Entries are never
 // expired automatically: a file that is gone from disk is simply ignored, and
 // a "declined" entry is the user's exclusion list (delete it by hand to retry).
+//
+// On disk an entry is a single string, "done" or "failed: <error>", so the
+// file stays a flat "path": "outcome" map that is trivial to edit by hand.
 type StateEntry struct {
-	Outcome    Outcome   `json:"outcome"`
-	Time       time.Time `json:"time"`
-	SizeBefore int64     `json:"size_before,omitempty"`
-	SizeAfter  int64     `json:"size_after,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Outcome Outcome
+	Error   string
+}
+
+const failedPrefix = string(OutcomeFailed) + ": "
+
+func (e StateEntry) MarshalJSON() ([]byte, error) {
+	s := string(e.Outcome)
+	if e.Error != "" {
+		s += ": " + e.Error
+	}
+	return json.Marshal(s)
+}
+
+func (e *StateEntry) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	if rest, ok := strings.CutPrefix(s, failedPrefix); ok {
+		*e = StateEntry{Outcome: OutcomeFailed, Error: rest}
+		return nil
+	}
+	*e = StateEntry{Outcome: Outcome(s)}
+	return nil
 }
 
 // flushEvery bounds how many records may be lost on a crash during a long
@@ -74,9 +100,6 @@ func (s *State) Len() int {
 }
 
 func (s *State) Record(path string, e StateEntry) {
-	if e.Time.IsZero() {
-		e.Time = time.Now()
-	}
 	s.entries[path] = e
 	s.dirty++
 	slog.Debug("State entry recorded", "path", path, "outcome", e.Outcome, "error", e.Error)

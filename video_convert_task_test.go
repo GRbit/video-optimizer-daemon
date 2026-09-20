@@ -234,6 +234,29 @@ func TestCheckDuration(t *testing.T) {
 	}
 }
 
+func TestCheckSavings(t *testing.T) {
+	cases := []struct {
+		name   string
+		before int64
+		after  int64
+		enough bool
+	}{
+		{"half size", 1000, 500, true},
+		{"exactly 10 percent", 1000, 900, true},
+		{"just under 10 percent", 1000, 901, false},
+		{"same size", 1000, 1000, false},
+		{"grew", 1000, 1200, false},
+		{"unknown original size", 0, 500, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checkSavings(tc.before, tc.after); got != tc.enough {
+				t.Errorf("checkSavings(%d, %d) = %v, want %v", tc.before, tc.after, got, tc.enough)
+			}
+		})
+	}
+}
+
 func TestCleanUpIgnoresMissingTempFile(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
