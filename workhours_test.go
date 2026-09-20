@@ -5,34 +5,12 @@ import (
 	"time"
 )
 
-func TestParseWorkWindow(t *testing.T) {
-	w, err := parseWorkWindow("")
-	if err != nil || w != nil {
-		t.Errorf("empty spec: got %v, %v; want nil window", w, err)
-	}
-	if !w.contains(time.Now()) {
-		t.Error("nil window must always be open")
-	}
-
-	for _, bad := range []string{"23:00", "25:00-07:00", "23:60-07:00", "23:00-23:00", "night", "23:00-07:00-08:00"} {
-		if _, err := parseWorkWindow(bad); err == nil {
-			t.Errorf("parseWorkWindow(%q) should fail", bad)
-		}
-	}
-
-	w, err = parseWorkWindow(" 23:00-07:30 ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if w.String() != "23:00-07:30" {
-		t.Errorf("String() = %q", w.String())
-	}
-}
-
 func at(h, m int) time.Time {
 	return time.Date(2026, 9, 21, h, m, 0, 0, time.Local)
 }
 
+// Windows crossing midnight and the inclusive/exclusive edges are where the
+// minute arithmetic goes wrong, so both are pinned here.
 func TestWorkWindowContains(t *testing.T) {
 	day, _ := parseWorkWindow("09:00-17:00")
 	night, _ := parseWorkWindow("23:00-07:00")

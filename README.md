@@ -1,6 +1,5 @@
 # video-optimizer-daemon
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/grbit/video-optimizer-daemon.svg)](https://pkg.go.dev/github.com/grbit/video-optimizer-daemon)
 [![Go Report Card](https://goreportcard.com/badge/github.com/grbit/video-optimizer-daemon)](https://goreportcard.com/report/github.com/grbit/video-optimizer-daemon)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/GRbit/video-optimizer-daemon)](go.mod)
 [![License: AGPL-3.0](https://img.shields.io/github/license/GRbit/video-optimizer-daemon)](LICENSE)

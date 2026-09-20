@@ -19,7 +19,6 @@ import (
 const (
 	envMediaDir      = "MEDIA_DIR"
 	envHandbrakeConf = "HANDBRAKE_CONF"
-	envPromptMode    = "PROMPT_MODE"
 	envMediaList     = "MEDIA_LIST_PATH"
 	envTempDirPath   = "TEMP_DIR"
 	envStatePath     = "STATE_PATH"
@@ -72,31 +71,32 @@ type Config struct {
 	Preset2160p          string
 }
 
+type MediaInfoTrack struct {
+	Type     string `json:"@type"`
+	Format   string `json:"Format"`
+	CodecID  string `json:"CodecID"`
+	Width    string `json:"Width"`
+	Height   string `json:"Height"`
+	Bitrate  string `json:"Bitrate"`
+	Duration string `json:"Duration"`
+}
+
 type MediaInfoOutput struct {
 	Media struct {
-		Tracks []struct {
-			Type     string `json:"@type"`
-			Format   string `json:"Format"`
-			CodecID  string `json:"CodecID"`
-			Language string `json:"Language"`
-			Width    string `json:"Width"`
-			Height   string `json:"Height"`
-			Bitrate  string `json:"Bitrate"`
-			Duration string `json:"Duration"`
-		} `json:"track"`
+		Tracks []MediaInfoTrack `json:"track"`
 	} `json:"media"`
 }
 
+type MkvMergeTrack struct {
+	ID         int    `json:"id"`
+	Type       string `json:"type"`
+	Properties struct {
+		Language string `json:"language"`
+	} `json:"properties"`
+}
+
 type MkvMergeOutput struct {
-	Tracks []struct {
-		ID         int    `json:"id"`
-		Type       string `json:"type"`
-		Codec      string `json:"codec"`
-		Properties struct {
-			Language        string `json:"language"`
-			PixelDimensions string `json:"pixel_dimensions"`
-		} `json:"properties"`
-	} `json:"tracks"`
+	Tracks []MkvMergeTrack `json:"tracks"`
 }
 
 // defaultHandbrakeConf returns the HandBrake GUI presets file in the user's
@@ -120,7 +120,7 @@ func defaultStatePath(cfg Config) string {
 }
 
 func loadConfig() (Config, error) {
-	promptPtr := flag.Bool("prompt", false, "Ask for confirmation before starting a conversion and before replacing original files")
+	promptPtr := flag.Bool("prompt", false, "Interactive mode: ask before starting a conversion and before replacing the original (terminal only)")
 	mediaDirPtr := flag.String("media-dir", defaultMediaDir, "Directory to scan for media files")
 	handbrakeConfPtr := flag.String("handbrake-conf", defaultHandbrakeConf(), "Path to HandBrake presets JSON file")
 	mediaListPtr := flag.String("media-list", "", "Path to a file with video paths, one per line; replaces directory scanning")
@@ -161,10 +161,8 @@ func loadConfig() (Config, error) {
 	envString(&cfg.WorkHours, envWorkHours)
 	envString(&cfg.Preset1080p, envPreset1080p)
 	envString(&cfg.Preset2160p, envPreset2160p)
-	if os.Getenv(envPromptMode) != "" && !cfg.PromptMode {
-		envVal, _ := strconv.ParseBool(os.Getenv(envPromptMode))
-		cfg.PromptMode = envVal
-	}
+	// PromptMode has no env override on purpose: it is for interactive runs
+	// from a terminal, never for a container or a service.
 	if v := os.Getenv(envMinAge); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -318,12 +316,12 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 }
 
 func isAlreadyOptimized(info *MediaInfoOutput) bool {
+	// Substring match on the upper-cased CodecID, so "HEVC" also covers
+	// "V_MPEGH/ISO/HEVC" and "MPEG-H/HEVC/h.265", "AV1" covers "V_AV1", etc.
 	alreadyOptimizedCodecs := []string{
-		"MPEG-H/HEVC/h.265", "HEVC", "V_MPEGH/ISO/HEVC", "265",
-		"AV1", "V_AV1", "VVC",
-		"AV2", "V_AV2",
-		"DVHE", "V_DVHE", "DVH1", "V_DVH1",
-		"HVC1", "HVC2",
+		"HEVC", "265", "HVC1", "HVC2",
+		"AV1", "AV2", "VVC",
+		"DVHE", "DVH1",
 	}
 
 	for _, track := range info.Media.Tracks {
@@ -522,20 +520,6 @@ func promptConfirm(ctx context.Context) (bool, error) {
 }
 
 func closeCloser(c io.Closer) {
-	if c == nil {
-		return
-	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			if r == "runtime error: invalid memory address or nil pointer dereference" {
-				slog.Debug("Attempted to close a nil pointer", "recovered", r)
-				return
-			}
-			panic(r)
-		}
-	}()
-
 	if err := c.Close(); err != nil {
 		slog.Warn("Failed to close", "err", err)
 	}

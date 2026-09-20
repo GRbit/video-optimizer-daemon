@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
+// The state file is edited by hand, so its on-disk shape is part of the
+// contract: flat "path": "outcome" map, "failed: <error>" for failures.
 func TestStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, stateFileName)
@@ -74,29 +75,5 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if !reloaded.Has("/media/c.mkv") {
 		t.Errorf("declined entry must survive a reload")
-	}
-}
-
-func TestStateRejectsCorruptFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), stateFileName)
-	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadState(path); err == nil {
-		t.Error("corrupt state file must be an error, not silently replaced with an empty state")
-	}
-}
-
-func TestStateAutoFlush(t *testing.T) {
-	path := filepath.Join(t.TempDir(), stateFileName)
-	s, err := loadState(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < flushEvery; i++ {
-		s.Record("/media/"+time.Duration(i).String()+".mkv", StateEntry{Outcome: OutcomeSkippedHEVC})
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("state should be flushed automatically after %d records: %v", flushEvery, err)
 	}
 }

@@ -261,8 +261,9 @@ func durationSeconds(info *MediaInfoOutput) (float64, error) {
 	return 0, errors.New("no duration in mediainfo output")
 }
 
-// checkDuration is the only guard between "HandBrake exited 0" and deleting the
-// original. Size is deliberately not compared: a much smaller file is the goal.
+// checkDuration is the guard between "HandBrake exited 0" and deleting the
+// original: a truncated encode still exits 0. Size is judged separately by
+// checkSavings, which keeps the original rather than failing.
 func checkDuration(orig, converted *MediaInfoOutput) error {
 	origDur, err := durationSeconds(orig)
 	if err != nil {

@@ -2,13 +2,14 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -72,10 +73,6 @@ type candidate struct {
 }
 
 func candidatesFromDirectory(ctx context.Context, cfg Config, state *State) ([]string, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
 	// Recomputed per scan: a daemon-wide constant would freeze at start time
 	// and newer files would never become eligible.
 	threshold := time.Now().Add(-cfg.MinAge)
@@ -116,11 +113,11 @@ func candidatesFromDirectory(ctx context.Context, cfg Config, state *State) ([]s
 		return nil, err
 	}
 
-	sort.SliceStable(found, func(i, j int) bool { return found[i].size > found[j].size })
+	slices.SortStableFunc(found, func(a, b candidate) int { return cmp.Compare(b.size, a.size) })
 
-	paths := make([]string, len(found))
-	for i, c := range found {
-		paths[i] = c.path
+	paths := make([]string, 0, len(found))
+	for _, c := range found {
+		paths = append(paths, c.path)
 	}
 	slog.Debug("Media directory scanned", "candidates", len(paths))
 	return paths, nil

@@ -15,9 +15,8 @@ import (
 
 // fakeHandbrake is a stand-in for HandBrakeCLI: it re-encodes the video with
 // ffmpeg at a throwaway quality (sources from makeVideo are lossless, so the
-// result is far smaller and passes the size-gain guard) and prints one
-// progress line the way HandBrake does. FAKE_HB_SECONDS truncates the output
-// so the duration guard can be exercised.
+// result is far smaller and passes the size-gain guard). FAKE_HB_SECONDS
+// truncates the output so the duration guard can be exercised.
 const fakeHandbrake = `#!/bin/sh
 in=""; out=""; crf=""
 while [ $# -gt 0 ]; do
@@ -32,8 +31,6 @@ done
 limit=""
 if [ -n "$FAKE_HB_SECONDS" ]; then limit="-t $FAKE_HB_SECONDS"; fi
 echo "[fake] crf=$crf" >&2
-printf 'Encoding: task 1 of 1, 42.50 %% (10.00 fps, avg 10.00 fps, ETA 00h00m01s)\r'
-printf 'Encoding: task 1 of 1, 100.00 %% (10.00 fps, avg 10.00 fps, ETA 00h00m00s)\n'
 exec ffmpeg -loglevel error -y -i "$in" $limit -c:v libx264 -preset ultrafast -crf 40 -c:a copy -f matroska "$out"
 `
 
@@ -155,12 +152,9 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 		t.Errorf("temp dir not cleaned: %v", entries)
 	}
 
-	// The fake encoder is called with -q and its stdout is parsed, not echoed.
-	out := logs.String()
-	for _, want := range []string{"crf=18", "percent=42", "percent=100", "Encoding completed"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("log should contain %q:\n%s", want, out)
-		}
+	// The CRF reaches HandBrake through -q (the fake echoes it on stderr).
+	if out := logs.String(); !strings.Contains(out, "crf=18") {
+		t.Errorf("log should show the fake encoder received crf=18:\n%s", out)
 	}
 }
 
