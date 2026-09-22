@@ -208,6 +208,10 @@ func main() {
 		slog.Error("Invalid configuration", "err", err)
 		os.Exit(1)
 	}
+	if err := validateConfig(cfg); err != nil {
+		slog.Error("Invalid configuration", "err", err)
+		os.Exit(1)
+	}
 	state, err := loadState(cfg.StatePath)
 	if err != nil {
 		slog.Error("Cannot load state", "err", err)
