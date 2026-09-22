@@ -1,10 +1,10 @@
 # video-optimizer-daemon
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/grbit/video-optimizer-daemon)](https://goreportcard.com/report/github.com/grbit/video-optimizer-daemon)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/GRbit/video-optimizer-daemon)](go.mod)
 [![License: AGPL-3.0](https://img.shields.io/github/license/GRbit/video-optimizer-daemon)](LICENSE)
 
-Continuous video transcoding daemon. Scan media directories and automatically transcode video files to HEVC/x265 using HandBrakeCLI.
+Continuous video transcoding daemon. Scans a media directory and transcodes
+video files to HEVC/x265 with HandBrakeCLI, one file at a time, largest first.
 
 # DISCLAIMER
 
@@ -13,30 +13,52 @@ Purpose-built for a specific use case, not a generic solution.
 ## SYNOPSIS
 
 ```
-video-optimizer [-prompt] [-media-dir=directory] [-media-list=path]
-                [-handbrake-conf=path] [-preset-1080p=name] [-preset-2160p=name]
-                [-tmp=directory] [-state=path] [-min-age=duration]
-                [-work-hours=HH:MM-HH:MM] [-log-level=level]
+video-optimizer-daemon [-media-dir=directory] [-media-list=path]
+                       [-handbrake-conf=path] [-preset-1080p=name] [-preset-2160p=name]
+                       [-tmp=directory] [-state=path] [-min-age=duration]
+                       [-work-hours=HH:MM-HH:MM] [-log-level=level] [-prompt]
 ```
 
-## DESCRIPTION
+## REQUIREMENTS
 
-**video-optimizer** is a continuous daemon that scans a media directory (or a
-list of absolute file paths) for eligible video files and transcodes them to
-the more efficient HEVC/x265 codec using HandBrakeCLI.
+- Linux. The daemon sets its own priority with `setpriority` and pauses
+  HandBrake with SIGSTOP/SIGCONT, neither of which exists on Windows.
+- `HandBrakeCLI`, `mkvmerge` (mkvtoolnix) and `mediainfo` in `PATH`.
+- A HandBrake presets file (the GUI's `~/.config/ghb/presets.json` works)
+  containing the two base presets, see [Transcoding](#transcoding).
+- Space in the temp directory for two files at once: HandBrake's output and
+  the final mkvmerge assembly, together roughly twice the size of the result.
+
+All of this is checked at start. A missing tool, a preset name that is not in
+the file, an unwritable temp or state directory, or `-prompt` without a
+terminal makes the daemon exit with a message listing every problem found.
+Nothing is written to the state file in that case: these are configuration
+errors, not file errors.
+
+## BUILD AND RUN
+
+```
+go install github.com/grbit/video-optimizer-daemon@latest
+video-optimizer-daemon -media-dir /srv/media -tmp /srv/tmp -work-hours 23:00-07:00
+```
+
+Or from a checkout: `go build` produces `./video-optimizer-daemon`.
+
+Run it as the user who owns the media files: the daemon replaces files in
+place and copies their permission bits, but it cannot change ownership.
+
+To stop it, send SIGINT or SIGTERM (Ctrl-C, `docker stop`). A running
+HandBrake or mkvmerge is killed, temp files are removed, and the interrupted
+file is not recorded in the state, so it is picked up first on the next start.
+
+## DESCRIPTION
 
 Each cycle the daemon collects all eligible files in one pass, orders them by
 size (largest first) and takes the first one that is not already HEVC. That
 file is transcoded, assembled with mkvmerge, verified and put in place of the
-original. Then the cycle starts over. Every file the daemon has looked at is
-recorded in a state file, so nothing is examined twice, even across restarts.
-
-**Requirements**:
-* mediainfo
-* mkvmerge
-* HandBrakeCLI
-* A HandBrake presets file (the GUI's `presets.json` works) containing the
-  two base presets, see [Transcoding](#transcoding).
+original. Then the cycle starts over. Every file the daemon has decided about
+is recorded in a state file, so nothing is examined twice, even across
+restarts.
 
 ### Eligibility
 
@@ -51,7 +73,8 @@ the following:
 
 When using a media list file, the extension and modification time checks are
 not applied: any existing regular file from the list without a state entry is
-a candidate. Lines are taken in file order.
+a candidate. Lines are taken in file order. Lines that do not point to an
+existing file are skipped and checked again on the next scan.
 
 A candidate whose video track is already an optimized format (HEVC/H.265,
 AV1, AV2, VVC, DVHE, DVH1, HVC1, HVC2) is recorded as `skipped_hevc` and the
@@ -92,8 +115,10 @@ mkvmerge -o final.mkv [--audio-tracks ids] --no-subtitles --no-chapters --no-att
   audio tracks with the same language, only the first per language is kept.
 - Subtitles, chapters, attachments (for example ASS fonts) and tags come from
   the original file, so nothing the original carried is lost.
-- Sidecar files whose names start with the original's base name and have one
-  of the extensions `.ass`, `.srt`, `.mka` are merged in as extra sources.
+- Sidecar files are merged in as extra sources. A sidecar is any file in the
+  same directory whose name starts with the original's name without extension
+  and ends in `.ass`, `.srt` or `.mka`. For `Movie.mkv` that means
+  `Movie.srt` and `Movie.en.ass`, but also `Movie 2.srt`.
 
 ### Verification and replacement
 
@@ -104,14 +129,13 @@ not, the task fails, the original stays and the file is recorded as `failed`.
 The assembled file must also be at least 10% smaller than the original.
 Otherwise the original is kept and the file is recorded as `small_gain`: a
 re-encode always adds artifacts, and a few percent of disk space is not worth
-them. This check runs before the replacement prompt in prompt mode.
+them.
 
 Then the daemon:
 
 1. Moves the assembled file next to the original under its new name
    (falling back to copy, fsync and size check when rename crosses devices).
-2. Gives it the permission bits of the original. Owner and group are not
-   changed, so run the daemon as the user who owns the library.
+2. Gives it the permission bits of the original.
 3. Deletes the original and every sidecar that was merged.
 
 Other files that share the original's name prefix (`.nfo`, `.jpg`, `Movie
@@ -146,18 +170,14 @@ exactly that purpose. Entries for files that no longer exist are harmless.
 
 The file is rewritten atomically after every task and during long scans.
 
-### Prompt mode
+### Scheduling and priority
 
-When `-prompt` is enabled, the daemon pauses before each step requiring a
-decision:
+After a task that ends without an error (`done`, `declined`, `small_gain`)
+the next scan starts immediately. After a failed task or an empty scan the
+daemon waits one minute.
 
-- Before transcoding: asks whether to start conversion.
-- After the result is assembled and verified: asks whether to replace the
-  original file, showing original and new file sizes.
-
-The user must type `y` or `yes` to proceed. Any other answer records the file
-as `declined`, which is how a file is permanently excluded (see
-[State file](#state-file)).
+At start the daemon lowers its own priority to nice 19; HandBrakeCLI, mkvmerge
+and mediainfo inherit it.
 
 ### Work hours
 
@@ -168,28 +188,26 @@ paused with SIGSTOP and resumed with SIGCONT when the window opens again, so
 long encodes are never thrown away. mkvmerge and mediainfo are short and are
 not paused.
 
-### Scheduling and priority
+### Prompt mode
 
-After a successful task the next scan starts immediately. After a failed task
-or an empty scan the daemon waits one minute.
+`-prompt` is for running the daemon by hand in a terminal to review what it
+would do. It asks before starting each conversion and again, with the sizes
+of both files, before replacing the original. The user must type `y` or `yes`
+to proceed. Any other answer records the file as `declined`, which is how a
+file is permanently excluded (see [State file](#state-file)).
 
-At start the daemon lowers its own priority to nice 19; HandBrakeCLI, mkvmerge
-and mediainfo inherit it.
+There is no environment variable for it, and the daemon refuses to start with
+`-prompt` when stdin is not a terminal.
 
 ### Logging
 
 Logs go to stderr via `log/slog`. `info` covers start-up, the chosen file and
-encoding parameters, HandBrake progress every 10 percent, and the outcome of
-each task with sizes. `debug` adds every external command with its arguments,
-every step of a task, HandBrake progress per percent, HandBrake's own stderr,
-and the reason for every skipped file. HandBrake's raw progress stream is
-never echoed.
+encoding parameters, and the outcome of each task with sizes. `debug` adds
+every external command with its arguments, every step of a task, HandBrake's
+own stderr line by line, and the reason for every skipped file. HandBrake's
+stdout (the progress line) is discarded.
 
 ## OPTIONS
-
-**-prompt**
-: Ask for confirmation before starting a conversion and before replacing
-  original files.
 
 **-media-dir=directory**
 : Directory to scan for media files. Default: `/media`.
@@ -210,9 +228,8 @@ never echoed.
 : HandBrake preset for sources above 1080p. Default: `slow-2160p-20`.
 
 **-tmp=directory**
-: Directory to use for temporary files. Current Linux systems can use RAM for
-  temp file system, usually it's not enough for big media files. You can set it
-  to a directory on a disk with enough free space. Default: system temp directory.
+: Directory for temporary files. Needs room for two copies of the result;
+  a RAM-backed tmpfs is usually too small. Default: system temp directory.
 
 **-state=path**
 : Path to the JSON state file. Default: `.video-optimizer-state.json` in the
@@ -229,10 +246,13 @@ never echoed.
 **-log-level=level**
 : `debug`, `info`, `warn` or `error`. Default: `info`.
 
+**-prompt**
+: Interactive mode, see [Prompt mode](#prompt-mode). Terminal only.
+
 ## ENVIRONMENT VARIABLES
 
 The following environment variables override their corresponding command-line
-options:
+options. `-prompt` has no environment variable.
 
 **MEDIA_DIR**
 : Overrides `-media-dir`.
@@ -245,10 +265,6 @@ options:
 
 **PRESET_1080P**, **PRESET_2160P**
 : Override `-preset-1080p` and `-preset-2160p`.
-
-**PROMPT_MODE**
-: Overrides `-prompt`. Must be a boolean string. Only takes effect when the
-  `-prompt` flag is not set (it can enable prompt mode, not disable it).
 
 **TEMP_DIR**
 : Overrides `-tmp`.
@@ -268,9 +284,8 @@ options:
 ## DOCKER
 
 `docker-compose.yaml` builds the image and runs the daemon as `PUID:PGID`
-(default `1000:1000`); set them to the owner of your media files, since the
-daemon replaces files in place and cannot change ownership. Put the settings
-in `.env`:
+(default `1000:1000`); set them to the owner of your media files. Put the
+settings in `.env`:
 
 ```
 MEDIA_DIR=/srv/media
@@ -286,7 +301,22 @@ TZ=Europe/Berlin                 # work hours are in the container's local time
 LOG_LEVEL=info
 ```
 
+Then:
+
+```
+docker compose up -d --build
+docker compose logs -f
+```
+
 The presets directory is mounted read-only at `/ghb` and `HANDBRAKE_CONF` is
-set to `/ghb/presets.json`. In list mode the state file defaults to the media
-directory, because a single-file bind mount has no writable parent inside the
-container.
+set to `/ghb/presets.json`. Configuration errors show up in the logs on the
+first lines and the container exits; with `restart: always` it will keep
+restarting until the setup is fixed.
+
+Two things to know about the media list in Docker:
+
+- The state file defaults to the media directory, because a single-file bind
+  mount has no writable parent inside the container.
+- A single-file bind mount follows the inode. If you rewrite the list with an
+  editor that saves through rename (most do), the container keeps seeing the
+  old file until it is restarted. Appending with `>>` is safe.
