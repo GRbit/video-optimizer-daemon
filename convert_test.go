@@ -115,8 +115,8 @@ func TestConvertDeclinedBeforeEncoding(t *testing.T) {
 
 	asked := 0
 	conv := converter{
-		cfg:     Config{TempDirPath: dir, Preset1080p: "p"},
-		encoder: encoder{presetsPath: "/nonexistent"},
+		tempDir: dir,
+		encoder: encoder{presetsPath: "/nonexistent", preset1080p: "p"},
 		confirm: func(ctx context.Context, question string) (bool, error) {
 			asked++
 			return false, nil

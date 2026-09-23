@@ -24,15 +24,78 @@ type processHook func(ctx context.Context, proc *os.Process)
 // supervised are implementation.
 type encoder struct {
 	presetsPath string
+	preset1080p string
+	preset2160p string
 	hook        processHook
 }
 
 func newEncoder(cfg Config, window *workWindow) encoder {
-	e := encoder{presetsPath: cfg.HandbrakePresetsPath}
+	e := encoder{
+		presetsPath: cfg.HandbrakePresetsPath,
+		preset1080p: cfg.Preset1080p,
+		preset2160p: cfg.Preset2160p,
+	}
 	if window != nil {
 		e.hook = pauseOutsideWindow(window)
 	}
 	return e
+}
+
+// selectEncoding picks the preset family by resolution and the CRF from the
+// source's resolution and bitrate. The CRF is passed to HandBrake with -q, so
+// the preset itself only needs to describe the encoder settings.
+func (e encoder) selectEncoding(f VideoFacts) (preset string, crf int) {
+	width, height, bitrate := f.Width, f.Height, f.Bitrate
+
+	preset = e.preset1080p
+	quality := 20
+
+	uhd := width > 1920 || height > 1080
+	if uhd {
+		preset = e.preset2160p
+		if width >= 2100 || height >= 1200 {
+			quality++
+		}
+	}
+	if width < 1280 && height < 720 {
+		quality--
+		if width < 854 && height < 480 {
+			quality--
+			if width < 640 && height < 360 {
+				quality--
+			}
+		}
+	}
+
+	if bitrate != 0 {
+		if bitrate > 5_000_000 {
+			quality--
+			if bitrate > 12_000_000 {
+				quality--
+			}
+		}
+		if bitrate < 1_500_000 {
+			quality++
+		}
+	}
+
+	if uhd {
+		quality = clamp(quality, 17, 21)
+	} else {
+		quality = clamp(quality, 14, 21)
+	}
+
+	return preset, quality
+}
+
+func clamp(val, min, max int) int {
+	if val < min {
+		return min
+	}
+	if val > max {
+		return max
+	}
+	return val
 }
 
 // stderrTailLines is how much of HandBrake's stderr is kept for the error log
@@ -53,7 +116,7 @@ func (e encoder) run(ctx context.Context, input, output, preset string, crf int)
 	}
 	slog.Debug("Running HandBrakeCLI", "args", args)
 
-	cmd := exec.CommandContext(ctx, "HandBrakeCLI", args...)
+	cmd := exec.CommandContext(ctx, handbrakeBin, args...)
 	cmd.Stdout = io.Discard
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

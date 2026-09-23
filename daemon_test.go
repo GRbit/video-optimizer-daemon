@@ -35,7 +35,7 @@ func TestProcessNextOrchestration(t *testing.T) {
 	results := map[string]convertResult{}
 	convertErr := map[string]error{}
 	d := &Daemon{
-		cfg:   cfg,
+		scan:  scanSettings{mediaDir: media, minAge: time.Hour},
 		state: state,
 		probe: func(path string) (VideoFacts, error) {
 			switch filepath.Base(path) {

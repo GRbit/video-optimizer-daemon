@@ -19,7 +19,7 @@ import (
 func validateConfig(cfg Config) error {
 	var problems []string
 
-	for _, tool := range []string{"HandBrakeCLI", "mkvmerge", "mediainfo"} {
+	for _, tool := range requiredTools {
 		if _, err := exec.LookPath(tool); err != nil {
 			problems = append(problems, fmt.Sprintf("%s not found in PATH", tool))
 		}

@@ -42,7 +42,7 @@ type mediaInfoOutput struct {
 // art or a thumbnail stream.
 func probeVideo(path string) (VideoFacts, error) {
 	var out mediaInfoOutput
-	if err := runJSON("mediainfo", []string{"--fullscan", "--Output=JSON", path}, &out); err != nil {
+	if err := runJSON(mediainfoBin, []string{"--fullscan", "--Output=JSON", path}, &out); err != nil {
 		return VideoFacts{}, err
 	}
 	// mediainfo exits 0 and prints "media": null for a file it cannot open.

@@ -4,13 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -38,24 +35,6 @@ const (
 	retryDelay = time.Minute
 )
 
-var (
-	validVideoExtensions = func() map[string]struct{} {
-		exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
-		ret := make(map[string]struct{}, len(exts))
-		for _, e := range exts {
-			ret["."+e] = struct{}{}
-		}
-		return ret
-	}()
-
-	// sidecarExtensions define list of file extensions that should be merged into the final output if they exist alongside the original video file
-	sidecarExtensions = map[string]bool{
-		".ass": true,
-		".srt": true,
-		".mka": true,
-	}
-)
-
 type Config struct {
 	PromptMode           bool
 	MediaDir             string
@@ -68,18 +47,6 @@ type Config struct {
 	WorkHours            string
 	Preset1080p          string
 	Preset2160p          string
-}
-
-type MkvMergeTrack struct {
-	ID         int    `json:"id"`
-	Type       string `json:"type"`
-	Properties struct {
-		Language string `json:"language"`
-	} `json:"properties"`
-}
-
-type MkvMergeOutput struct {
-	Tracks []MkvMergeTrack `json:"tracks"`
 }
 
 // defaultHandbrakeConf returns the HandBrake GUI presets file in the user's
@@ -220,24 +187,31 @@ func main() {
 // record. The slow parts come in as two function values so this logic can be
 // driven in tests without mediainfo or an encoder on PATH.
 type Daemon struct {
-	cfg     Config
+	scan    scanSettings
 	state   *State
 	window  *workWindow
 	probe   func(path string) (VideoFacts, error)
 	convert func(ctx context.Context, path string, facts VideoFacts) (convertResult, error)
 }
 
+// newDaemon is where Config is taken apart: every module below gets only the
+// settings it uses.
 func newDaemon(cfg Config, state *State, window *workWindow) *Daemon {
 	confirm := alwaysConfirm
 	if cfg.PromptMode {
 		confirm = terminalConfirm
 	}
+	conv := converter{
+		tempDir: cfg.TempDirPath,
+		encoder: newEncoder(cfg, window),
+		confirm: confirm,
+	}
 	return &Daemon{
-		cfg:     cfg,
+		scan:    scanSettings{mediaDir: cfg.MediaDir, mediaListPath: cfg.MediaListPath, minAge: cfg.MinAge},
 		state:   state,
 		window:  window,
 		probe:   probeVideo,
-		convert: converter{cfg: cfg, encoder: newEncoder(cfg, window), confirm: confirm}.convert,
+		convert: conv.convert,
 	}
 }
 
@@ -286,7 +260,7 @@ func (d *Daemon) loop(ctx context.Context) {
 // runs that one task and returns. Every file it looked at is recorded in the
 // state whatever the outcome: a broken file retried every scan blocks the queue.
 func (d *Daemon) processNext(ctx context.Context) (bool, error) {
-	candidates, err := findCandidates(ctx, d.cfg, d.state)
+	candidates, err := findCandidates(ctx, d.scan, d.state.Has)
 	if err != nil {
 		return false, fmt.Errorf("search files: %w", err)
 	}
@@ -325,153 +299,21 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 // memory either way, and the loop has nothing better to do with the error.
 func (d *Daemon) record(path string, e StateEntry) {
 	if err := d.state.Record(path, e); err != nil {
-		slog.Error("Failed to write state file", "path", d.cfg.StatePath, "err", err)
+		slog.Error("Failed to write state file", "path", d.state.path, "err", err)
 	}
 }
 
-// selectEncoding picks the preset family by resolution and the CRF from the
-// source's resolution and bitrate. The CRF is passed to HandBrake with -q, so
-// the preset itself only needs to describe the encoder settings.
-func selectEncoding(cfg Config, f VideoFacts) (preset string, crf int) {
-	width, height, bitrate := f.Width, f.Height, f.Bitrate
-
-	preset = cfg.Preset1080p
-	quality := 20
-
-	uhd := width > 1920 || height > 1080
-	if uhd {
-		preset = cfg.Preset2160p
-		if width >= 2100 || height >= 1200 {
-			quality++
-		}
+// lowerPriority puts the whole daemon on nice 19 so every child (HandBrake,
+// mkvmerge, mediainfo) inherits it and no external "nice" binary is needed.
+//
+// Linux nice is per thread and the Go runtime already has several by now, so
+// PRIO_PROCESS would cover only the calling thread and children started from
+// other goroutines would keep nice 0. PRIO_PGRP with pid 0 covers every thread
+// of this process (and anything else in its process group).
+func lowerPriority() {
+	if err := syscall.Setpriority(syscall.PRIO_PGRP, 0, 19); err != nil {
+		slog.Warn("Failed to lower process priority", "err", err)
+		return
 	}
-	if width < 1280 && height < 720 {
-		quality--
-		if width < 854 && height < 480 {
-			quality--
-			if width < 640 && height < 360 {
-				quality--
-			}
-		}
-	}
-
-	if bitrate != 0 {
-		if bitrate > 5_000_000 {
-			quality--
-			if bitrate > 12_000_000 {
-				quality--
-			}
-		}
-		if bitrate < 1_500_000 {
-			quality++
-		}
-	}
-
-	if uhd {
-		quality = clamp(quality, 17, 21)
-	} else {
-		quality = clamp(quality, 14, 21)
-	}
-
-	return preset, quality
-}
-
-func clamp(val, min, max int) int {
-	if val < min {
-		return min
-	}
-	if val > max {
-		return max
-	}
-	return val
-}
-
-// copyFile is the cross-device fallback for os.Rename. The original is deleted
-// right after it succeeds, so a partial destination is removed on any failure
-// and the copy is fsynced and size-checked before reporting success.
-func copyFile(src, dst string) (err error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("opening input file: %w", err)
-	}
-	defer closeCloser(in)
-
-	srcStat, err := in.Stat()
-	if err != nil {
-		return fmt.Errorf("stat input file: %w", err)
-	}
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("creating output file: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
-				slog.Warn("Failed to remove partial copy", "path", dst, "err", rmErr)
-			}
-		}
-	}()
-
-	written, err := io.Copy(out, in)
-	if err != nil {
-		closeCloser(out)
-		return fmt.Errorf("copying data: %w", err)
-	}
-	if err = out.Sync(); err != nil {
-		closeCloser(out)
-		return fmt.Errorf("syncing output file: %w", err)
-	}
-	if err = out.Close(); err != nil {
-		return fmt.Errorf("closing output file: %w", err)
-	}
-
-	if written != srcStat.Size() {
-		err = fmt.Errorf("size mismatch after copy: source %d bytes, written %d bytes", srcStat.Size(), written)
-		return err
-	}
-
-	return nil
-}
-
-func formatNum[T int | int64](n T) string {
-	return formatStr(strconv.Itoa(int(n)))
-}
-
-func formatStr(s string) string {
-	n := len(s)
-	if n <= 3 {
-		return s
-	}
-
-	var b strings.Builder
-	pre := n % 3
-	if pre > 0 {
-		b.WriteString(s[:pre])
-		if n > pre {
-			b.WriteString(",")
-		}
-	}
-	for i := pre; i < n; i += 3 {
-		b.WriteString(s[i : i+3])
-		if i+3 < n {
-			b.WriteString(",")
-		}
-	}
-	return b.String()
-}
-
-func fileSize(p string) int64 {
-	info, err := os.Stat(p)
-	if err != nil {
-		slog.Warn("Failed to stat file", "path", p, "err", err)
-		return 0
-	}
-	return info.Size()
-}
-
-func closeCloser(c io.Closer) {
-	if err := c.Close(); err != nil {
-		slog.Warn("Failed to close", "err", err)
-	}
+	slog.Debug("Process priority lowered", "nice", 19)
 }

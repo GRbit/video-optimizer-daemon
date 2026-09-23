@@ -9,22 +9,28 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
-	"syscall"
 )
 
-// lowerPriority puts the whole daemon on nice 19 so every child (HandBrake,
-// mkvmerge, mediainfo) inherits it and no external "nice" binary is needed.
-//
-// Linux nice is per thread and the Go runtime already has several by now, so
-// PRIO_PROCESS would cover only the calling thread and children started from
-// other goroutines would keep nice 0. PRIO_PGRP with pid 0 covers every thread
-// of this process (and anything else in its process group).
-func lowerPriority() {
-	if err := syscall.Setpriority(syscall.PRIO_PGRP, 0, 19); err != nil {
-		slog.Warn("Failed to lower process priority", "err", err)
-		return
-	}
-	slog.Debug("Process priority lowered", "nice", 19)
+// The external tools, named once: the runners below and the start-up check
+// in validate.go share these, so the two can never disagree.
+const (
+	handbrakeBin = "HandBrakeCLI"
+	mkvmergeBin  = "mkvmerge"
+	mediainfoBin = "mediainfo"
+)
+
+var requiredTools = []string{handbrakeBin, mkvmergeBin, mediainfoBin}
+
+type MkvMergeTrack struct {
+	ID         int    `json:"id"`
+	Type       string `json:"type"`
+	Properties struct {
+		Language string `json:"language"`
+	} `json:"properties"`
+}
+
+type MkvMergeOutput struct {
+	Tracks []MkvMergeTrack `json:"tracks"`
 }
 
 // runJSON runs an external tool that prints JSON on stdout and decodes it
@@ -50,7 +56,7 @@ func runJSON(name string, args []string, dst any) error {
 
 func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 	var data MkvMergeOutput
-	if err := runJSON("mkvmerge", []string{"-J", path}, &data); err != nil {
+	if err := runJSON(mkvmergeBin, []string{"-J", path}, &data); err != nil {
 		return nil, err
 	}
 	return &data, nil
@@ -59,7 +65,7 @@ func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 func runMkvmerge(ctx context.Context, args []string) error {
 	slog.Debug("Running mkvmerge", "args", args)
 
-	cmd := exec.CommandContext(ctx, "mkvmerge", args...)
+	cmd := exec.CommandContext(ctx, mkvmergeBin, args...)
 	out, err := cmd.CombinedOutput()
 
 	// mkvmerge exits with 1 when the output was written but warnings were

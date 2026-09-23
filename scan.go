@@ -14,25 +14,40 @@ import (
 	"time"
 )
 
-// findCandidates returns every file worth looking at, most valuable first, so
-// that one tree walk serves a whole run of skips instead of one walk per file.
-// Files already present in the state are excluded here; the codec check needs
-// mediainfo and is done by the caller.
-func findCandidates(ctx context.Context, cfg Config, state *State) ([]string, error) {
-	if cfg.MediaListPath != "" {
-		return candidatesFromList(ctx, cfg, state)
+var validVideoExtensions = func() map[string]struct{} {
+	exts := []string{"mkv", "mp4", "avi", "mov", "m4v", "webm", "ts"}
+	ret := make(map[string]struct{}, len(exts))
+	for _, e := range exts {
+		ret["."+e] = struct{}{}
 	}
-	return candidatesFromDirectory(ctx, cfg, state)
+	return ret
+}()
+
+type scanSettings struct {
+	mediaDir      string
+	mediaListPath string // when set, replaces the directory walk
+	minAge        time.Duration
 }
 
-func candidatesFromList(ctx context.Context, cfg Config, state *State) ([]string, error) {
-	file, err := os.Open(cfg.MediaListPath)
+// findCandidates returns every file worth looking at, most valuable first, so
+// that one tree walk serves a whole run of skips instead of one walk per file.
+// Files for which skip returns true (already in the state) are excluded here;
+// the codec check needs mediainfo and is done by the caller.
+func findCandidates(ctx context.Context, s scanSettings, skip func(path string) bool) ([]string, error) {
+	if s.mediaListPath != "" {
+		return candidatesFromList(ctx, s, skip)
+	}
+	return candidatesFromDirectory(ctx, s, skip)
+}
+
+func candidatesFromList(ctx context.Context, s scanSettings, skip func(path string) bool) ([]string, error) {
+	file, err := os.Open(s.mediaListPath)
 	if err != nil {
 		return nil, fmt.Errorf("open media list: %w", err)
 	}
 	defer closeCloser(file)
 
-	slog.Debug("Reading media list", "path", cfg.MediaListPath)
+	slog.Debug("Reading media list", "path", s.mediaListPath)
 
 	var candidates []string
 	scanner := bufio.NewScanner(file)
@@ -44,7 +59,7 @@ func candidatesFromList(ctx context.Context, cfg Config, state *State) ([]string
 		if path == "" {
 			continue
 		}
-		if state.Has(path) {
+		if skip(path) {
 			slog.Debug("Skipping list entry: already in state", "path", path)
 			continue
 		}
@@ -72,14 +87,14 @@ type candidate struct {
 	size int64
 }
 
-func candidatesFromDirectory(ctx context.Context, cfg Config, state *State) ([]string, error) {
+func candidatesFromDirectory(ctx context.Context, s scanSettings, skip func(path string) bool) ([]string, error) {
 	// Recomputed per scan: a daemon-wide constant would freeze at start time
 	// and newer files would never become eligible.
-	threshold := time.Now().Add(-cfg.MinAge)
-	slog.Debug("Scanning media directory", "dir", cfg.MediaDir, "modified_before", threshold.Format(time.RFC3339))
+	threshold := time.Now().Add(-s.minAge)
+	slog.Debug("Scanning media directory", "dir", s.mediaDir, "modified_before", threshold.Format(time.RFC3339))
 
 	var found []candidate
-	err := filepath.WalkDir(cfg.MediaDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(s.mediaDir, func(path string, d fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -93,7 +108,7 @@ func candidatesFromDirectory(ctx context.Context, cfg Config, state *State) ([]s
 		if _, ok := validVideoExtensions[strings.ToLower(filepath.Ext(path))]; !ok {
 			return nil
 		}
-		if state.Has(path) {
+		if skip(path) {
 			slog.Debug("Skipping: already in state", "path", path)
 			return nil
 		}

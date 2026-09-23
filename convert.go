@@ -25,9 +25,17 @@ const minSavingsPercent = 10.0
 // converter holds what every conversion needs and nothing about any one
 // conversion: per-file state (paths, temp files) lives inside convert.
 type converter struct {
-	cfg     Config
+	tempDir string
 	encoder encoder
 	confirm confirmFunc
+}
+
+// sidecarExtensions are the files next to a video that get merged into the
+// result and deleted with the original.
+var sidecarExtensions = map[string]bool{
+	".ass": true,
+	".srt": true,
+	".mka": true,
 }
 
 // convertResult says how a conversion ended when it did not fail. The
@@ -48,7 +56,7 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	slog.Info("Source video", "path", targetPath, "format", facts.Format, "codec", facts.CodecID,
 		"resolution", fmt.Sprintf("%dx%d", facts.Width, facts.Height), "bitrate", facts.Bitrate, "size", sizeBefore)
 
-	preset, crf := selectEncoding(c.cfg, facts)
+	preset, crf := c.encoder.selectEncoding(facts)
 	slog.Info("Selected encoding", "preset", preset, "crf", crf)
 
 	confirmed, err := c.confirm(ctx, fmt.Sprintf("\n--- ACTION REQUIRED ---\nFile to convert: %s\nStart conversion? (y/n): ", targetPath))
@@ -63,7 +71,7 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	var tempFiles []string
 	defer func() { removeTempFiles(tempFiles) }()
 	newTemp := func(pattern string) (string, error) {
-		path, err := createTempFile(c.cfg.TempDirPath, pattern)
+		path, err := createTempFile(c.tempDir, pattern)
 		if err == nil {
 			tempFiles = append(tempFiles, path)
 		}
@@ -143,6 +151,34 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 		"saved_percent", fmt.Sprintf("%.1f", savingsPercent(sizeBefore, sizeAfter)))
 
 	return convertReplaced, nil
+}
+
+// formatNum groups digits for the prompt text: "8,123,456,789".
+func formatNum[T int | int64](n T) string {
+	return formatStr(strconv.Itoa(int(n)))
+}
+
+func formatStr(s string) string {
+	n := len(s)
+	if n <= 3 {
+		return s
+	}
+
+	var b strings.Builder
+	pre := n % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if n > pre {
+			b.WriteString(",")
+		}
+	}
+	for i := pre; i < n; i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < n {
+			b.WriteString(",")
+		}
+	}
+	return b.String()
 }
 
 func savingsPercent(sizeBefore, sizeAfter int64) float64 {
