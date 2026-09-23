@@ -214,19 +214,50 @@ func main() {
 		cancel()
 	}()
 
-	d := &Daemon{cfg: cfg, state: state, window: window, encoder: newEncoder(cfg, window)}
-	d.loop(ctx)
+	newDaemon(cfg, state, window).loop(ctx)
 
 	if err := state.Flush(); err != nil {
 		slog.Error("Failed to flush state on shutdown", "err", err)
 	}
 }
 
+// Daemon is the orchestration: which file next, one task per pass, what to
+// record. The slow parts come in as two function values so this logic can be
+// driven in tests without mediainfo or an encoder on PATH.
 type Daemon struct {
 	cfg     Config
 	state   *State
 	window  *workWindow
-	encoder encoder
+	probe   func(path string) (VideoFacts, error)
+	convert func(ctx context.Context, path string, facts VideoFacts) (convertResult, error)
+}
+
+func newDaemon(cfg Config, state *State, window *workWindow) *Daemon {
+	enc := newEncoder(cfg, window)
+	return &Daemon{
+		cfg:    cfg,
+		state:  state,
+		window: window,
+		probe:  probeVideo,
+		convert: func(ctx context.Context, path string, facts VideoFacts) (convertResult, error) {
+			task := &VideoConvertTask{cfg: cfg, targetPath: path, facts: facts, encoder: enc}
+			return task.Run(ctx)
+		},
+	}
+}
+
+// outcomeOf is the only place a conversion result becomes a state entry.
+func outcomeOf(res convertResult, err error) StateEntry {
+	switch {
+	case err != nil:
+		return StateEntry{Outcome: OutcomeFailed, Error: err.Error()}
+	case res == convertDeclined:
+		return StateEntry{Outcome: OutcomeDeclined}
+	case res == convertGainTooSmall:
+		return StateEntry{Outcome: OutcomeSmallGain}
+	default:
+		return StateEntry{Outcome: OutcomeDone}
+	}
 }
 
 func (d *Daemon) loop(ctx context.Context) {
@@ -275,7 +306,7 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 			return false, ctx.Err()
 		}
 
-		facts, err := probeVideo(path)
+		facts, err := d.probe(path)
 		if err != nil {
 			slog.Warn("Skipping file: probe failed", "path", path, "err", err)
 			d.state.Record(path, StateEntry{Outcome: OutcomeFailed, Error: "probe: " + err.Error()})
@@ -288,16 +319,12 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 		}
 
 		slog.Info("Found target candidate", "path", path)
-		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, facts: facts, encoder: d.encoder}
-		entry, err := task.Run(ctx)
+		res, err := d.convert(ctx, path, facts)
 		if ctx.Err() != nil {
 			// Shutdown interrupted the task; leave it eligible for the next start.
 			return false, ctx.Err()
 		}
-		if err != nil {
-			entry = StateEntry{Outcome: OutcomeFailed, Error: err.Error()}
-		}
-		d.state.Record(path, entry)
+		d.state.Record(path, outcomeOf(res, err))
 		return true, err
 	}
 

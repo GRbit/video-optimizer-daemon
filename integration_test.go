@@ -111,12 +111,12 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	origSize := fileSize(orig)
 
 	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig), encoder: newEncoder(cfg, nil)}
-	entry, err := task.Run(context.Background())
+	res, err := task.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
 	}
-	if entry.Outcome != OutcomeDone {
-		t.Errorf("entry = %+v, want done", entry)
+	if res != convertReplaced {
+		t.Errorf("result = %v, want convertReplaced", res)
 	}
 
 	result := filepath.Join(media, "Movie.x265.mkv")
@@ -223,7 +223,7 @@ func TestDaemonProcessNext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: cfg, state: state, encoder: newEncoder(cfg, nil)}
+	d := newDaemon(cfg, state, nil)
 
 	processed, err := d.processNext(context.Background())
 	if err != nil || !processed {

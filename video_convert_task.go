@@ -45,9 +45,18 @@ func (t *VideoConvertTask) CleanUp() {
 	}
 }
 
-// Run converts the target and returns what to record about it. The caller
-// decides what to do with a returned error; it is never "done" then.
-func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
+// convertResult says how a conversion ended when it did not fail. The task
+// does not know about the state file; mapping to an Outcome is the caller's.
+type convertResult int
+
+const (
+	convertReplaced     convertResult = iota // original replaced by the new file
+	convertDeclined                          // user said no at a prompt
+	convertGainTooSmall                      // encoded, but original kept
+)
+
+// Run converts the target. On error the original is always left in place.
+func (t *VideoConvertTask) Run(ctx context.Context) (convertResult, error) {
 	sizeBefore := fileSize(t.targetPath)
 	slog.Info("Source video", "path", t.targetPath, "format", t.facts.Format, "codec", t.facts.CodecID,
 		"resolution", fmt.Sprintf("%dx%d", t.facts.Width, t.facts.Height), "bitrate", t.facts.Bitrate, "size", sizeBefore)
@@ -61,17 +70,17 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		fmt.Print("Start conversion? (y/n): ")
 		confirmed, err := promptConfirm(ctx)
 		if err != nil {
-			return StateEntry{}, err
+			return convertReplaced, err
 		}
 		if !confirmed {
 			slog.Info("Conversion declined", "path", t.targetPath)
-			return StateEntry{Outcome: OutcomeDeclined}, nil
+			return convertDeclined, nil
 		}
 	}
 
 	encodedPath, err := t.createTempFile("video_opt_*.mkv")
 	if err != nil {
-		return StateEntry{}, fmt.Errorf("creating video_opt: %w", err)
+		return convertReplaced, fmt.Errorf("creating video_opt: %w", err)
 	}
 
 	defer t.CleanUp()
@@ -79,20 +88,20 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 	slog.Info("Starting HandBrake conversion", "path", t.targetPath)
 	started := time.Now()
 	if err := t.encoder.run(ctx, t.targetPath, encodedPath, preset, crf); err != nil {
-		return StateEntry{}, fmt.Errorf("run handbrake: %w", err)
+		return convertReplaced, fmt.Errorf("run handbrake: %w", err)
 	}
 	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))
 
 	slog.Debug("Checking audio tracks on converted file", "path", encodedPath)
 	encodedInfo, err := getMkvMergeInfo(encodedPath)
 	if err != nil {
-		return StateEntry{}, err
+		return convertReplaced, err
 	}
 	keepAudio := audioTracksToKeep(encodedInfo)
 
 	sidecars, err := findSidecarFiles(t.targetPath)
 	if err != nil {
-		return StateEntry{}, fmt.Errorf("find sidecar files: %w", err)
+		return convertReplaced, fmt.Errorf("find sidecar files: %w", err)
 	}
 	if len(sidecars) > 0 {
 		slog.Info("Sidecar files will be merged", "count", len(sidecars), "files", sidecars)
@@ -100,21 +109,21 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 
 	finalPath, err := t.createTempFile("video_final_*.mkv")
 	if err != nil {
-		return StateEntry{}, fmt.Errorf("creating video_final: %w", err)
+		return convertReplaced, fmt.Errorf("creating video_final: %w", err)
 	}
 
 	args := mkvmergeArgs(finalPath, encodedPath, t.targetPath, keepAudio, sidecars)
 	if err := runMkvmerge(ctx, args); err != nil {
-		return StateEntry{}, fmt.Errorf("mkvmerge final mux: %w", err)
+		return convertReplaced, fmt.Errorf("mkvmerge final mux: %w", err)
 	}
 	slog.Debug("Final mux successful", "path", finalPath)
 
 	finalFacts, err := probeVideo(finalPath)
 	if err != nil {
-		return StateEntry{}, fmt.Errorf("probe converted file: %w", err)
+		return convertReplaced, fmt.Errorf("probe converted file: %w", err)
 	}
 	if err := checkDuration(t.facts, finalFacts); err != nil {
-		return StateEntry{}, fmt.Errorf("verify converted file: %w", err)
+		return convertReplaced, fmt.Errorf("verify converted file: %w", err)
 	}
 	slog.Debug("Duration check passed", "original_s", t.facts.Duration, "converted_s", finalFacts.Duration)
 	sizeAfter := fileSize(finalPath)
@@ -123,7 +132,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 			"size_before", sizeBefore, "size_after", sizeAfter,
 			"saved_percent", fmt.Sprintf("%.1f", savingsPercent(sizeBefore, sizeAfter)),
 			"min_percent", minSavingsPercent)
-		return StateEntry{Outcome: OutcomeSmallGain}, nil
+		return convertGainTooSmall, nil
 	}
 
 	if t.cfg.PromptMode {
@@ -135,22 +144,22 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 		fmt.Print("Replace original file? (y/n): ")
 		confirmed, err := promptConfirm(ctx)
 		if err != nil {
-			return StateEntry{}, err
+			return convertReplaced, err
 		}
 		if !confirmed {
 			slog.Info("File replacement declined", "path", t.targetPath)
-			return StateEntry{Outcome: OutcomeDeclined}, nil
+			return convertDeclined, nil
 		}
 	}
 
 	if err := t.replaceOriginalWithEncoded(finalPath, sidecars); err != nil {
-		return StateEntry{}, fmt.Errorf("replace encoded file: %w", err)
+		return convertReplaced, fmt.Errorf("replace encoded file: %w", err)
 	}
 
 	slog.Info("Encoding completed", "path", t.targetPath, "size_before", sizeBefore, "size_after", sizeAfter,
 		"saved_percent", fmt.Sprintf("%.1f", savingsPercent(sizeBefore, sizeAfter)))
 
-	return StateEntry{Outcome: OutcomeDone}, nil
+	return convertReplaced, nil
 }
 
 func savingsPercent(sizeBefore, sizeAfter int64) float64 {
