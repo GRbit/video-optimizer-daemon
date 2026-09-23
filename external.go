@@ -51,14 +51,6 @@ func runJSON(name string, args []string, dst any) error {
 	return nil
 }
 
-func getMediaInfo(path string) (*MediaInfoOutput, error) {
-	var data MediaInfoOutput
-	if err := runJSON("mediainfo", []string{"--fullscan", "--Output=JSON", path}, &data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
 func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
 	var data MkvMergeOutput
 	if err := runJSON("mkvmerge", []string{"-J", path}, &data); err != nil {

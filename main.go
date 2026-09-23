@@ -71,22 +71,6 @@ type Config struct {
 	Preset2160p          string
 }
 
-type MediaInfoTrack struct {
-	Type     string `json:"@type"`
-	Format   string `json:"Format"`
-	CodecID  string `json:"CodecID"`
-	Width    string `json:"Width"`
-	Height   string `json:"Height"`
-	Bitrate  string `json:"Bitrate"`
-	Duration string `json:"Duration"`
-}
-
-type MediaInfoOutput struct {
-	Media struct {
-		Tracks []MediaInfoTrack `json:"track"`
-	} `json:"media"`
-}
-
 type MkvMergeTrack struct {
 	ID         int    `json:"id"`
 	Type       string `json:"type"`
@@ -290,20 +274,20 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 			return false, ctx.Err()
 		}
 
-		info, err := getMediaInfo(path)
+		facts, err := probeVideo(path)
 		if err != nil {
-			slog.Warn("Skipping file: mediainfo failed", "path", path, "err", err)
-			d.state.Record(path, StateEntry{Outcome: OutcomeFailed, Error: "mediainfo: " + err.Error()})
+			slog.Warn("Skipping file: probe failed", "path", path, "err", err)
+			d.state.Record(path, StateEntry{Outcome: OutcomeFailed, Error: "probe: " + err.Error()})
 			continue
 		}
-		if isAlreadyOptimized(info) {
-			slog.Debug("Skipping file: already optimized", "path", path)
+		if facts.AlreadyOptimized() {
+			slog.Debug("Skipping file: already optimized", "path", path, "codec", facts.CodecID)
 			d.state.Record(path, StateEntry{Outcome: OutcomeSkippedHEVC})
 			continue
 		}
 
 		slog.Info("Found target candidate", "path", path)
-		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, mediaInfo: info, window: d.window}
+		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, facts: facts, window: d.window}
 		entry, err := task.Run(ctx)
 		if ctx.Err() != nil {
 			// Shutdown interrupted the task; leave it eligible for the next start.
@@ -319,47 +303,11 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-func isAlreadyOptimized(info *MediaInfoOutput) bool {
-	// Substring match on the upper-cased CodecID, so "HEVC" also covers
-	// "V_MPEGH/ISO/HEVC" and "MPEG-H/HEVC/h.265", "AV1" covers "V_AV1", etc.
-	alreadyOptimizedCodecs := []string{
-		"HEVC", "265", "HVC1", "HVC2",
-		"AV1", "AV2", "VVC",
-		"DVHE", "DVH1",
-	}
-
-	for _, track := range info.Media.Tracks {
-		if strings.EqualFold(track.Type, "video") {
-			codec := strings.ToUpper(track.CodecID)
-			for _, skip := range alreadyOptimizedCodecs {
-				if strings.Contains(codec, skip) {
-					return true
-				}
-			}
-			if strings.EqualFold(track.Format, "HEVC") {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // selectEncoding picks the preset family by resolution and the CRF from the
 // source's resolution and bitrate. The CRF is passed to HandBrake with -q, so
 // the preset itself only needs to describe the encoder settings.
-func selectEncoding(cfg Config, info *MediaInfoOutput) (preset string, crf int) {
-	width := 0
-	height := 0
-	bitrate := 0
-
-	for _, track := range info.Media.Tracks {
-		if strings.EqualFold(track.Type, "video") {
-			width, _ = strconv.Atoi(track.Width)
-			height, _ = strconv.Atoi(track.Height)
-			bitrate, _ = strconv.Atoi(track.Bitrate)
-		}
-	}
+func selectEncoding(cfg Config, f VideoFacts) (preset string, crf int) {
+	width, height, bitrate := f.Width, f.Height, f.Bitrate
 
 	preset = cfg.Preset1080p
 	quality := 20

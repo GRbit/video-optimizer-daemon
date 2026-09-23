@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,7 +25,7 @@ const minSavingsPercent = 10.0
 type VideoConvertTask struct {
 	cfg        Config
 	targetPath string
-	mediaInfo  *MediaInfoOutput
+	facts      VideoFacts
 	window     *workWindow
 	tempFiles  []string
 }
@@ -50,25 +48,11 @@ func (t *VideoConvertTask) CleanUp() {
 // Run converts the target and returns what to record about it. The caller
 // decides what to do with a returned error; it is never "done" then.
 func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
-	origInfo := t.mediaInfo
-	if origInfo == nil {
-		var err error
-		origInfo, err = getMediaInfo(t.targetPath)
-		if err != nil {
-			return StateEntry{}, fmt.Errorf("get mediainfo: %w", err)
-		}
-	}
-
 	sizeBefore := fileSize(t.targetPath)
-	for _, track := range origInfo.Media.Tracks {
-		if strings.EqualFold(track.Type, "video") {
-			slog.Info("Source video", "path", t.targetPath, "format", track.Format, "codec", track.CodecID,
-				"resolution", track.Width+"x"+track.Height, "bitrate", track.Bitrate, "size", sizeBefore)
-			break
-		}
-	}
+	slog.Info("Source video", "path", t.targetPath, "format", t.facts.Format, "codec", t.facts.CodecID,
+		"resolution", fmt.Sprintf("%dx%d", t.facts.Width, t.facts.Height), "bitrate", t.facts.Bitrate, "size", sizeBefore)
 
-	preset, crf := selectEncoding(t.cfg, origInfo)
+	preset, crf := selectEncoding(t.cfg, t.facts)
 	slog.Info("Selected encoding", "preset", preset, "crf", crf)
 
 	if t.cfg.PromptMode {
@@ -125,13 +109,14 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 	}
 	slog.Debug("Final mux successful", "path", finalPath)
 
-	finalInfo, err := getMediaInfo(finalPath)
+	finalFacts, err := probeVideo(finalPath)
 	if err != nil {
-		return StateEntry{}, fmt.Errorf("get mediainfo of converted file: %w", err)
+		return StateEntry{}, fmt.Errorf("probe converted file: %w", err)
 	}
-	if err := checkDuration(origInfo, finalInfo); err != nil {
+	if err := checkDuration(t.facts, finalFacts); err != nil {
 		return StateEntry{}, fmt.Errorf("verify converted file: %w", err)
 	}
+	slog.Debug("Duration check passed", "original_s", t.facts.Duration, "converted_s", finalFacts.Duration)
 	sizeAfter := fileSize(finalPath)
 	if !checkSavings(sizeBefore, sizeAfter) {
 		slog.Info("Size gain too small, keeping original", "path", t.targetPath,
@@ -250,37 +235,6 @@ func mkvmergeArgs(output, encoded, original string, keepAudio, sidecars []string
 	args = append(args, "--no-video", "--no-audio", original)
 	args = append(args, sidecars...)
 	return args
-}
-
-func durationSeconds(info *MediaInfoOutput) (float64, error) {
-	for _, track := range info.Media.Tracks {
-		if strings.EqualFold(track.Type, "General") && track.Duration != "" {
-			return strconv.ParseFloat(track.Duration, 64)
-		}
-	}
-	return 0, errors.New("no duration in mediainfo output")
-}
-
-// checkDuration is the guard between "HandBrake exited 0" and deleting the
-// original: a truncated encode still exits 0. Size is judged separately by
-// checkSavings, which keeps the original rather than failing.
-func checkDuration(orig, converted *MediaInfoOutput) error {
-	origDur, err := durationSeconds(orig)
-	if err != nil {
-		return fmt.Errorf("original: %w", err)
-	}
-	convDur, err := durationSeconds(converted)
-	if err != nil {
-		return fmt.Errorf("converted: %w", err)
-	}
-
-	drift := time.Duration(math.Abs(origDur-convDur) * float64(time.Second))
-	if drift > maxDurationDrift {
-		return fmt.Errorf("duration mismatch: original %.1fs, converted %.1fs, drift %v exceeds %v",
-			origDur, convDur, drift.Round(time.Millisecond), maxDurationDrift)
-	}
-	slog.Debug("Duration check passed", "original_s", origDur, "converted_s", convDur)
-	return nil
 }
 
 // h264CodecToken matches "x264", "h264", "h.264" in any case. A trailing digit is

@@ -54,6 +54,15 @@ func makeVideo(t *testing.T, path string, seconds int) {
 	}
 }
 
+func mustProbe(t *testing.T, path string) VideoFacts {
+	t.Helper()
+	facts, err := probeVideo(path)
+	if err != nil {
+		t.Fatalf("probeVideo(%s): %v", path, err)
+	}
+	return facts
+}
+
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -101,7 +110,7 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	touch(t, filepath.Join(media, "Movie 2.mkv"))
 	origSize := fileSize(orig)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig}
+	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig)}
 	entry, err := task.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
@@ -166,7 +175,7 @@ func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
 	orig := filepath.Join(media, "Long.h264.mp4")
 	makeVideo(t, orig, 15)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig}
+	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig)}
 	_, err := task.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
 		t.Fatalf("Run err = %v, want duration mismatch", err)
@@ -235,7 +244,7 @@ func TestDaemonProcessNext(t *testing.T) {
 		t.Errorf("small file should be done on the second pass, entry=%+v ok=%v", e, ok)
 	}
 
-	// The garbage file has no video track: mediainfo parses it, isAlreadyOptimized
+	// The garbage file has no video track: mediainfo parses it, AlreadyOptimized
 	// says no, and the fake encoder fails on it. The attempt counts as a
 	// processed task and is recorded as failed so the next pass skips it.
 	processed, err = d.processNext(context.Background())
