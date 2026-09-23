@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -233,12 +232,16 @@ type Daemon struct {
 }
 
 func newDaemon(cfg Config, state *State, window *workWindow) *Daemon {
+	confirm := alwaysConfirm
+	if cfg.PromptMode {
+		confirm = terminalConfirm
+	}
 	return &Daemon{
 		cfg:     cfg,
 		state:   state,
 		window:  window,
 		probe:   probeVideo,
-		convert: converter{cfg: cfg, encoder: newEncoder(cfg, window)}.convert,
+		convert: converter{cfg: cfg, encoder: newEncoder(cfg, window), confirm: confirm}.convert,
 	}
 }
 
@@ -466,33 +469,6 @@ func fileSize(p string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-func promptConfirm(ctx context.Context) (bool, error) {
-	reader := bufio.NewReader(os.Stdin)
-
-	var (
-		response string
-		errCh    = make(chan error)
-	)
-	go func() {
-		var err error
-		response, err = reader.ReadString('\n')
-		errCh <- err
-	}()
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case err := <-errCh:
-		if err != nil {
-			return false, fmt.Errorf("reading user input: %w", err)
-		}
-	}
-
-	response = strings.TrimSpace(strings.ToLower(response))
-	slog.Debug("Prompt answered", "response", response)
-	return response == "y" || response == "yes", nil
 }
 
 func closeCloser(c io.Closer) {

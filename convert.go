@@ -27,6 +27,7 @@ const minSavingsPercent = 10.0
 type converter struct {
 	cfg     Config
 	encoder encoder
+	confirm confirmFunc
 }
 
 // convertResult says how a conversion ended when it did not fail. The
@@ -50,18 +51,13 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	preset, crf := selectEncoding(c.cfg, facts)
 	slog.Info("Selected encoding", "preset", preset, "crf", crf)
 
-	if c.cfg.PromptMode {
-		fmt.Printf("\n--- ACTION REQUIRED ---\n")
-		fmt.Printf("File to convert: %s\n", targetPath)
-		fmt.Print("Start conversion? (y/n): ")
-		confirmed, err := promptConfirm(ctx)
-		if err != nil {
-			return convertReplaced, err
-		}
-		if !confirmed {
-			slog.Info("Conversion declined", "path", targetPath)
-			return convertDeclined, nil
-		}
+	confirmed, err := c.confirm(ctx, fmt.Sprintf("\n--- ACTION REQUIRED ---\nFile to convert: %s\nStart conversion? (y/n): ", targetPath))
+	if err != nil {
+		return convertReplaced, err
+	}
+	if !confirmed {
+		slog.Info("Conversion declined", "path", targetPath)
+		return convertDeclined, nil
 	}
 
 	var tempFiles []string
@@ -129,21 +125,14 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 		return convertGainTooSmall, nil
 	}
 
-	if c.cfg.PromptMode {
-		fmt.Printf("\n--- ACTION REQUIRED ---\n")
-		fmt.Printf("Original: %s\n", targetPath)
-		fmt.Printf("Original size: %s\n", formatNum(sizeBefore))
-		fmt.Printf("New File: %s\n", finalPath)
-		fmt.Printf("New size: %s\n", formatNum(sizeAfter))
-		fmt.Print("Replace original file? (y/n): ")
-		confirmed, err := promptConfirm(ctx)
-		if err != nil {
-			return convertReplaced, err
-		}
-		if !confirmed {
-			slog.Info("File replacement declined", "path", targetPath)
-			return convertDeclined, nil
-		}
+	confirmed, err = c.confirm(ctx, fmt.Sprintf("\n--- ACTION REQUIRED ---\nOriginal: %s\nOriginal size: %s\nNew File: %s\nNew size: %s\nReplace original file? (y/n): ",
+		targetPath, formatNum(sizeBefore), finalPath, formatNum(sizeAfter)))
+	if err != nil {
+		return convertReplaced, err
+	}
+	if !confirmed {
+		slog.Info("File replacement declined", "path", targetPath)
+		return convertDeclined, nil
 	}
 
 	if err := replaceOriginal(targetPath, finalPath, sidecars); err != nil {

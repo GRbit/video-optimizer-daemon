@@ -110,7 +110,7 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	touch(t, filepath.Join(media, "Movie 2.mkv"))
 	origSize := fileSize(orig)
 
-	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil)}
+	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil), confirm: alwaysConfirm}
 	res, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
@@ -175,7 +175,7 @@ func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
 	orig := filepath.Join(media, "Long.h264.mp4")
 	makeVideo(t, orig, 15)
 
-	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil)}
+	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil), confirm: alwaysConfirm}
 	_, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
 		t.Fatalf("Run err = %v, want duration mismatch", err)

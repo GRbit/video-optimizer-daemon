@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -100,6 +102,35 @@ func TestOptimizedFilePath(t *testing.T) {
 				t.Errorf("optimizedFilePath(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// Declining at the first prompt must end the conversion before anything is
+// encoded; the encoder here would fail loudly if it were reached.
+func TestConvertDeclinedBeforeEncoding(t *testing.T) {
+	captureLogs(t)
+	dir := t.TempDir()
+	orig := filepath.Join(dir, "Movie.mkv")
+	touch(t, orig)
+
+	asked := 0
+	conv := converter{
+		cfg:     Config{TempDirPath: dir, Preset1080p: "p"},
+		encoder: encoder{presetsPath: "/nonexistent"},
+		confirm: func(ctx context.Context, question string) (bool, error) {
+			asked++
+			return false, nil
+		},
+	}
+	res, err := conv.convert(context.Background(), orig, VideoFacts{Width: 1920, Height: 1080})
+	if err != nil || res != convertDeclined {
+		t.Errorf("convert = (%v, %v), want (convertDeclined, nil)", res, err)
+	}
+	if asked != 1 {
+		t.Errorf("confirm asked %d times, want 1", asked)
+	}
+	if _, err := os.Stat(orig); err != nil {
+		t.Errorf("declined conversion must leave the original: %v", err)
 	}
 }
 
