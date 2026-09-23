@@ -110,8 +110,8 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	touch(t, filepath.Join(media, "Movie 2.mkv"))
 	origSize := fileSize(orig)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig), encoder: newEncoder(cfg, nil)}
-	res, err := task.Run(context.Background())
+	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil)}
+	res, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
 	}
@@ -175,8 +175,8 @@ func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
 	orig := filepath.Join(media, "Long.h264.mp4")
 	makeVideo(t, orig, 15)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig), encoder: newEncoder(cfg, nil)}
-	_, err := task.Run(context.Background())
+	conv := converter{cfg: cfg, encoder: newEncoder(cfg, nil)}
+	_, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
 		t.Fatalf("Run err = %v, want duration mismatch", err)
 	}

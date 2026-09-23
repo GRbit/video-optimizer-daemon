@@ -233,16 +233,12 @@ type Daemon struct {
 }
 
 func newDaemon(cfg Config, state *State, window *workWindow) *Daemon {
-	enc := newEncoder(cfg, window)
 	return &Daemon{
-		cfg:    cfg,
-		state:  state,
-		window: window,
-		probe:  probeVideo,
-		convert: func(ctx context.Context, path string, facts VideoFacts) (convertResult, error) {
-			task := &VideoConvertTask{cfg: cfg, targetPath: path, facts: facts, encoder: enc}
-			return task.Run(ctx)
-		},
+		cfg:     cfg,
+		state:   state,
+		window:  window,
+		probe:   probeVideo,
+		convert: converter{cfg: cfg, encoder: newEncoder(cfg, window)}.convert,
 	}
 }
 
