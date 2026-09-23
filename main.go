@@ -214,7 +214,7 @@ func main() {
 		cancel()
 	}()
 
-	d := &Daemon{cfg: cfg, state: state, window: window}
+	d := &Daemon{cfg: cfg, state: state, window: window, encoder: newEncoder(cfg, window)}
 	d.loop(ctx)
 
 	if err := state.Flush(); err != nil {
@@ -223,9 +223,10 @@ func main() {
 }
 
 type Daemon struct {
-	cfg    Config
-	state  *State
-	window *workWindow
+	cfg     Config
+	state   *State
+	window  *workWindow
+	encoder encoder
 }
 
 func (d *Daemon) loop(ctx context.Context) {
@@ -287,7 +288,7 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 		}
 
 		slog.Info("Found target candidate", "path", path)
-		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, facts: facts, window: d.window}
+		task := &VideoConvertTask{cfg: d.cfg, targetPath: path, facts: facts, encoder: d.encoder}
 		entry, err := task.Run(ctx)
 		if ctx.Err() != nil {
 			// Shutdown interrupted the task; leave it eligible for the next start.

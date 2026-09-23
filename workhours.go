@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -100,42 +98,6 @@ func (w *workWindow) waitUntilOpen(ctx context.Context) bool {
 			return false
 		// The extra second lands safely inside the next minute.
 		case <-time.After(time.Until(next) + time.Second):
-		}
-	}
-}
-
-// supervise pauses proc with SIGSTOP whenever the window closes and resumes it
-// with SIGCONT when it opens again, until ctx is cancelled. Killing an encode
-// hours in at the window edge and starting over is what this avoids.
-func (w *workWindow) supervise(ctx context.Context, proc *os.Process) {
-	if w == nil {
-		return
-	}
-	paused := false
-	for {
-		next := w.nextChange(time.Now())
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Until(next) + time.Second):
-		}
-
-		inside := w.contains(time.Now())
-		switch {
-		case !inside && !paused:
-			if err := proc.Signal(syscall.SIGSTOP); err != nil {
-				slog.Debug("SIGSTOP failed", "pid", proc.Pid, "err", err)
-				continue
-			}
-			paused = true
-			slog.Info("Work window closed, encoder paused", "pid", proc.Pid, "resume_at", w.nextChange(time.Now()).Format(time.RFC3339))
-		case inside && paused:
-			if err := proc.Signal(syscall.SIGCONT); err != nil {
-				slog.Debug("SIGCONT failed", "pid", proc.Pid, "err", err)
-				continue
-			}
-			paused = false
-			slog.Info("Work window opened, encoder resumed", "pid", proc.Pid)
 		}
 	}
 }

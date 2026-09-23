@@ -110,7 +110,7 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	touch(t, filepath.Join(media, "Movie 2.mkv"))
 	origSize := fileSize(orig)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig)}
+	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig), encoder: newEncoder(cfg, nil)}
 	entry, err := task.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
@@ -175,7 +175,7 @@ func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
 	orig := filepath.Join(media, "Long.h264.mp4")
 	makeVideo(t, orig, 15)
 
-	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig)}
+	task := &VideoConvertTask{cfg: cfg, targetPath: orig, facts: mustProbe(t, orig), encoder: newEncoder(cfg, nil)}
 	_, err := task.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
 		t.Fatalf("Run err = %v, want duration mismatch", err)
@@ -223,7 +223,7 @@ func TestDaemonProcessNext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: cfg, state: state}
+	d := &Daemon{cfg: cfg, state: state, encoder: newEncoder(cfg, nil)}
 
 	processed, err := d.processNext(context.Background())
 	if err != nil || !processed {

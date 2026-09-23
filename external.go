@@ -1,16 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 )
@@ -79,57 +76,4 @@ func runMkvmerge(ctx context.Context, args []string) error {
 		slog.Error("mkvmerge failed", "err", err, "output", string(out))
 		return err
 	}
-}
-
-// stderrTailLines is how much of HandBrake's stderr is kept for the error log
-// when it fails; the full stream is already on debug.
-const stderrTailLines = 30
-
-// runHandbrakeCLI discards HandBrake's stdout: it carries only the progress
-// line rewritten with carriage returns, which grows container logs by megabytes
-// per movie. Everything useful (encoder settings, errors) is on stderr.
-func runHandbrakeCLI(ctx context.Context, cfg Config, input, output, preset string, crf int, window *workWindow) error {
-	args := []string{
-		"--preset-import-file", cfg.HandbrakePresetsPath,
-		"-Z", preset,
-		"-q", strconv.Itoa(crf),
-		"-i", input,
-		"-o", output,
-		"--format", "mkv",
-	}
-	slog.Debug("Running HandBrakeCLI", "args", args)
-
-	cmd := exec.CommandContext(ctx, "HandBrakeCLI", args...)
-	cmd.Stdout = io.Discard
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start HandBrakeCLI: %w", err)
-	}
-	slog.Debug("HandBrakeCLI started", "pid", cmd.Process.Pid)
-
-	superviseCtx, stopSupervise := context.WithCancel(ctx)
-	defer stopSupervise()
-	go window.supervise(superviseCtx, cmd.Process)
-
-	// The pipe must be drained before Wait, and reading it here also blocks
-	// until HandBrake closes stderr, i.e. exits.
-	var tail []string
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		slog.Debug("HandBrakeCLI stderr", "line", line)
-		tail = append(tail, line)
-		if len(tail) > stderrTailLines {
-			tail = tail[1:]
-		}
-	}
-
-	if err := cmd.Wait(); err != nil {
-		slog.Error("HandBrakeCLI failed", "err", err, "stderr_tail", strings.Join(tail, "\n"))
-		return err
-	}
-	return nil
 }

@@ -26,7 +26,7 @@ type VideoConvertTask struct {
 	cfg        Config
 	targetPath string
 	facts      VideoFacts
-	window     *workWindow
+	encoder    encoder
 	tempFiles  []string
 }
 
@@ -78,7 +78,7 @@ func (t *VideoConvertTask) Run(ctx context.Context) (StateEntry, error) {
 
 	slog.Info("Starting HandBrake conversion", "path", t.targetPath)
 	started := time.Now()
-	if err := runHandbrakeCLI(ctx, t.cfg, t.targetPath, encodedPath, preset, crf, t.window); err != nil {
+	if err := t.encoder.run(ctx, t.targetPath, encodedPath, preset, crf); err != nil {
 		return StateEntry{}, fmt.Errorf("run handbrake: %w", err)
 	}
 	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))
