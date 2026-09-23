@@ -214,10 +214,6 @@ func main() {
 	}()
 
 	newDaemon(cfg, state, window).loop(ctx)
-
-	if err := state.Flush(); err != nil {
-		slog.Error("Failed to flush state on shutdown", "err", err)
-	}
 }
 
 // Daemon is the orchestration: which file next, one task per pass, what to
@@ -294,11 +290,6 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("search files: %w", err)
 	}
-	defer func() {
-		if err := d.state.Flush(); err != nil {
-			slog.Error("Failed to flush state", "err", err)
-		}
-	}()
 
 	for _, path := range candidates {
 		if ctx.Err() != nil {
@@ -308,12 +299,12 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 		facts, err := d.probe(path)
 		if err != nil {
 			slog.Warn("Skipping file: probe failed", "path", path, "err", err)
-			d.state.Record(path, StateEntry{Outcome: OutcomeFailed, Error: "probe: " + err.Error()})
+			d.record(path, StateEntry{Outcome: OutcomeFailed, Error: "probe: " + err.Error()})
 			continue
 		}
 		if facts.AlreadyOptimized() {
 			slog.Debug("Skipping file: already optimized", "path", path, "codec", facts.CodecID)
-			d.state.Record(path, StateEntry{Outcome: OutcomeSkippedHEVC})
+			d.record(path, StateEntry{Outcome: OutcomeSkippedHEVC})
 			continue
 		}
 
@@ -323,11 +314,19 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 			// Shutdown interrupted the task; leave it eligible for the next start.
 			return false, ctx.Err()
 		}
-		d.state.Record(path, outcomeOf(res, err))
+		d.record(path, outcomeOf(res, err))
 		return true, err
 	}
 
 	return false, nil
+}
+
+// record logs a failed write instead of returning it: the entry is kept in
+// memory either way, and the loop has nothing better to do with the error.
+func (d *Daemon) record(path string, e StateEntry) {
+	if err := d.state.Record(path, e); err != nil {
+		slog.Error("Failed to write state file", "path", d.cfg.StatePath, "err", err)
+	}
 }
 
 // selectEncoding picks the preset family by resolution and the CRF from the

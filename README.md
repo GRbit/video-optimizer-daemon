@@ -168,7 +168,8 @@ Outcomes are `done`, `skipped_hevc`, `declined` (refused in prompt mode),
 To retry a file, delete its entry; the file is written with indentation for
 exactly that purpose. Entries for files that no longer exist are harmless.
 
-The file is rewritten atomically after every task and during long scans.
+The file is rewritten atomically (temp file plus rename) every time a file
+is recorded, so a crash never loses more than the entry being written.
 
 ### Scheduling and priority
 

@@ -229,10 +229,11 @@ func TestDaemonProcessNext(t *testing.T) {
 	if err != nil || !processed {
 		t.Fatalf("first pass: processed=%v err=%v", processed, err)
 	}
-	if e, ok := state.Get(big); !ok || e.Outcome != OutcomeDone {
-		t.Errorf("largest file should be done first, entry=%+v ok=%v", e, ok)
+	onDisk := readStateFile(t, cfg.StatePath)
+	if onDisk[big].Outcome != OutcomeDone {
+		t.Errorf("largest file should be done first, entry=%+v", onDisk[big])
 	}
-	if _, ok := state.Get(small); ok {
+	if _, ok := onDisk[small]; ok {
 		t.Errorf("only one file is encoded per pass")
 	}
 
@@ -240,8 +241,8 @@ func TestDaemonProcessNext(t *testing.T) {
 	if err != nil || !processed {
 		t.Fatalf("second pass: processed=%v err=%v", processed, err)
 	}
-	if e, ok := state.Get(small); !ok || e.Outcome != OutcomeDone {
-		t.Errorf("small file should be done on the second pass, entry=%+v ok=%v", e, ok)
+	if e := readStateFile(t, cfg.StatePath)[small]; e.Outcome != OutcomeDone {
+		t.Errorf("small file should be done on the second pass, entry=%+v", e)
 	}
 
 	// The garbage file has no video track: mediainfo parses it, AlreadyOptimized
@@ -251,8 +252,8 @@ func TestDaemonProcessNext(t *testing.T) {
 	if !processed || err == nil {
 		t.Errorf("third pass should attempt the broken file and fail: processed=%v err=%v", processed, err)
 	}
-	if e, ok := state.Get(broken); !ok || e.Outcome != OutcomeFailed || e.Error == "" {
-		t.Errorf("broken file should be recorded as failed with a reason, entry=%+v ok=%v", e, ok)
+	if e := readStateFile(t, cfg.StatePath)[broken]; e.Outcome != OutcomeFailed || e.Error == "" {
+		t.Errorf("broken file should be recorded as failed with a reason, entry=%+v", e)
 	}
 
 	processed, err = d.processNext(context.Background())
@@ -260,11 +261,7 @@ func TestDaemonProcessNext(t *testing.T) {
 		t.Errorf("fourth pass should find nothing: processed=%v err=%v", processed, err)
 	}
 
-	reloaded, err := loadState(cfg.StatePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.Len() != 3 {
-		t.Errorf("state on disk has %d entries, want 3", reloaded.Len())
+	if onDisk := readStateFile(t, cfg.StatePath); len(onDisk) != 3 {
+		t.Errorf("state on disk has %d entries, want 3: %v", len(onDisk), onDisk)
 	}
 }

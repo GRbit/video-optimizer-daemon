@@ -60,11 +60,12 @@ func TestProcessNextOrchestration(t *testing.T) {
 	if len(converted) != 1 || converted[0] != "big.mkv" {
 		t.Errorf("pass 1 should convert only the largest file, got %v", converted)
 	}
-	if got, _ := state.Get(filepath.Join(media, "big.mkv")); got != (StateEntry{Outcome: OutcomeSmallGain}) {
+	onDisk := readStateFile(t, cfg.StatePath)
+	if got := onDisk[filepath.Join(media, "big.mkv")]; got != (StateEntry{Outcome: OutcomeSmallGain}) {
 		t.Errorf("big.mkv recorded as %+v, want small_gain", got)
 	}
-	if state.Len() != 1 {
-		t.Errorf("pass 1 stops at the first convertible file; state has %d entries, want 1", state.Len())
+	if len(onDisk) != 1 {
+		t.Errorf("pass 1 stops at the first convertible file; state has %d entries, want 1", len(onDisk))
 	}
 
 	// Pass 2 walks past the HEVC file and the unreadable one, records both,
@@ -79,8 +80,9 @@ func TestProcessNextOrchestration(t *testing.T) {
 		"bad.mkv":   {Outcome: OutcomeFailed, Error: "probe: unreadable"},
 		"small.mkv": {Outcome: OutcomeFailed, Error: "boom"},
 	}
+	onDisk = readStateFile(t, cfg.StatePath)
 	for name, want := range expect {
-		if got, ok := state.Get(filepath.Join(media, name)); !ok || got != want {
+		if got, ok := onDisk[filepath.Join(media, name)]; !ok || got != want {
 			t.Errorf("%s: recorded %+v (ok=%v), want %+v", name, got, ok, want)
 		}
 	}

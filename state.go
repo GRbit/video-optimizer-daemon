@@ -56,15 +56,13 @@ func (e *StateEntry) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// flushEvery bounds how many records may be lost on a crash during a long
-// scan that skips thousands of already-HEVC files.
-const flushEvery = 100
-
-// State is the persistent "path -> outcome" journal behind the JSON state file.
+// State is the persistent "path -> outcome" journal behind the JSON state
+// file. Every Record reaches the disk before it returns: one small JSON write
+// per file is nothing next to the mediainfo run that always precedes it, and
+// it means there is no flush policy for a caller to get wrong.
 type State struct {
 	path    string
 	entries map[string]StateEntry
-	dirty   int
 }
 
 func loadState(path string) (*State, error) {
@@ -90,34 +88,17 @@ func (s *State) Has(path string) bool {
 	return ok
 }
 
-func (s *State) Get(path string) (StateEntry, bool) {
-	e, ok := s.entries[path]
-	return e, ok
-}
-
-func (s *State) Len() int {
-	return len(s.entries)
-}
-
-func (s *State) Record(path string, e StateEntry) {
+// Record stores the entry and rewrites the state file atomically (temp file
+// + rename). The in-memory entry stays even if the write fails, so the daemon
+// does not retry the file within this run.
+func (s *State) Record(path string, e StateEntry) error {
 	s.entries[path] = e
-	s.dirty++
 	slog.Debug("State entry recorded", "path", path, "outcome", e.Outcome, "error", e.Error)
-
-	if s.dirty >= flushEvery {
-		if err := s.Flush(); err != nil {
-			slog.Error("Failed to flush state", "err", err)
-		}
-	}
+	return s.write()
 }
 
-// Flush writes the state file atomically (temp file + rename) if anything
-// changed since the last flush. Indented JSON so the file can be edited by hand.
-func (s *State) Flush() error {
-	if s.dirty == 0 {
-		return nil
-	}
-
+func (s *State) write() error {
+	// Indented so the file can be edited by hand.
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
@@ -159,7 +140,6 @@ func (s *State) Flush() error {
 		return fmt.Errorf("replace state file: %w", err)
 	}
 
-	slog.Debug("State file written", "path", s.path, "entries", len(s.entries), "changed", s.dirty)
-	s.dirty = 0
+	slog.Debug("State file written", "path", s.path, "entries", len(s.entries))
 	return nil
 }
