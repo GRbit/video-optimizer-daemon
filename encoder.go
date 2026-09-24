@@ -19,9 +19,9 @@ import (
 // reaches the process without the conversion task knowing about it.
 type processHook func(ctx context.Context, proc *os.Process)
 
-// encoder runs HandBrakeCLI. Its whole interface is run(); which binary,
-// which arguments, what happens to stdout and stderr and how the process is
-// supervised are implementation.
+// encoder runs HandBrakeCLI. Its whole interface is run(); which preset and
+// CRF the source gets, which binary, which arguments, what happens to stdout
+// and stderr and how the process is supervised are implementation.
 type encoder struct {
 	presetsPath string
 	preset1080p string
@@ -105,7 +105,10 @@ const stderrTailLines = 30
 // run discards HandBrake's stdout: it carries only the progress line
 // rewritten with carriage returns, which grows container logs by megabytes
 // per movie. Everything useful (encoder settings, errors) is on stderr.
-func (e encoder) run(ctx context.Context, input, output, preset string, crf int) error {
+func (e encoder) run(ctx context.Context, facts VideoFacts, input, output string) error {
+	preset, crf := e.selectEncoding(facts)
+	slog.Info("Selected encoding", "preset", preset, "crf", crf)
+
 	args := []string{
 		"--preset-import-file", e.presetsPath,
 		"-Z", preset,

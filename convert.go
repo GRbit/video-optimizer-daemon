@@ -56,9 +56,6 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	slog.Info("Source video", "path", targetPath, "format", facts.Format, "codec", facts.CodecID,
 		"resolution", fmt.Sprintf("%dx%d", facts.Width, facts.Height), "bitrate", facts.Bitrate, "size", sizeBefore)
 
-	preset, crf := c.encoder.selectEncoding(facts)
-	slog.Info("Selected encoding", "preset", preset, "crf", crf)
-
 	confirmed, err := c.confirm(ctx, fmt.Sprintf("\n--- ACTION REQUIRED ---\nFile to convert: %s\nStart conversion? (y/n): ", targetPath))
 	if err != nil {
 		return convertReplaced, err
@@ -85,7 +82,7 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 
 	slog.Info("Starting HandBrake conversion", "path", targetPath)
 	started := time.Now()
-	if err := c.encoder.run(ctx, targetPath, encodedPath, preset, crf); err != nil {
+	if err := c.encoder.run(ctx, facts, targetPath, encodedPath); err != nil {
 		return convertReplaced, fmt.Errorf("run handbrake: %w", err)
 	}
 	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))

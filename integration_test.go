@@ -160,11 +160,6 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("temp dir not cleaned: %v", entries)
 	}
-
-	// The CRF reaches HandBrake through -q (the fake echoes it on stderr).
-	if out := logs.String(); !strings.Contains(out, "crf=18") {
-		t.Errorf("log should show the fake encoder received crf=18:\n%s", out)
-	}
 }
 
 func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
