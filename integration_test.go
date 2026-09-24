@@ -59,7 +59,7 @@ func makeVideo(t *testing.T, path string, seconds int) {
 func realConverter(cfg Config) converter {
 	return converter{
 		tempDir: cfg.TempDirPath,
-		encode:  newEncoder(cfg, nil).run,
+		encode:  newEncoder(cfg.HandbrakePresetsPath, cfg.Preset1080p, cfg.Preset2160p, nil).run,
 		mux:     muxWithMkvmerge,
 		probe:   probeVideo,
 		confirm: alwaysConfirm,

@@ -14,10 +14,6 @@ import (
 	"unicode/utf8"
 )
 
-// maxDurationDrift is how far the converted file's duration may differ from the
-// original before the result is treated as truncated and the original is kept.
-const maxDurationDrift = 10 * time.Second
-
 // minSavingsPercent is the smallest size reduction worth replacing the
 // original: every re-encode adds artifacts, and below this the trade is bad.
 const minSavingsPercent = 10.0
@@ -352,29 +348,4 @@ func replaceOriginal(targetPath, finalPath string, sidecars []string) error {
 	}
 
 	return nil
-}
-
-func createTempFile(dir, pattern string) (string, error) {
-	f, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return "", fmt.Errorf("creating tmp file: %w", err)
-	}
-	closeCloser(f)
-	slog.Debug("Temp file created", "path", f.Name())
-	return f.Name(), nil
-}
-
-func removeTempFiles(paths []string) {
-	for _, f := range paths {
-		err := os.Remove(f)
-		switch {
-		case err == nil:
-			slog.Debug("Removed temp file", "path", f)
-		case os.IsNotExist(err):
-			// After a successful rename the temp file already lives at the
-			// final path, so its absence here is the normal outcome.
-		default:
-			slog.Warn("Failed to remove temp file", "path", f, "err", err)
-		}
-	}
 }

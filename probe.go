@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // VideoFacts is everything the daemon decides on about a video file. It is
@@ -87,6 +88,10 @@ func (f VideoFacts) AlreadyOptimized() bool {
 	}
 	return strings.EqualFold(f.Format, "HEVC")
 }
+
+// maxDurationDrift is how far the converted file's duration may differ from the
+// original before the result is treated as truncated and the original is kept.
+const maxDurationDrift = 10 * time.Second
 
 // checkDuration compares two probes and rejects a converted file whose length
 // drifted more than maxDurationDrift from the original: a truncated encode

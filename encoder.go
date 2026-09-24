@@ -29,11 +29,11 @@ type encoder struct {
 	hook        processHook
 }
 
-func newEncoder(cfg Config, window *workWindow) encoder {
+func newEncoder(presetsPath, preset1080p, preset2160p string, window *workWindow) encoder {
 	e := encoder{
-		presetsPath: cfg.HandbrakePresetsPath,
-		preset1080p: cfg.Preset1080p,
-		preset2160p: cfg.Preset2160p,
+		presetsPath: presetsPath,
+		preset1080p: preset1080p,
+		preset2160p: preset2160p,
 	}
 	if window != nil {
 		e.hook = pauseOutsideWindow(window)

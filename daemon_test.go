@@ -25,8 +25,8 @@ func TestProcessNextOrchestration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := Config{MediaDir: media, MinAge: time.Hour, StatePath: filepath.Join(media, stateFileName)}
-	state, err := loadState(cfg.StatePath)
+	statePath := filepath.Join(media, stateFileName)
+	state, err := loadState(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestProcessNextOrchestration(t *testing.T) {
 	if len(converted) != 1 || converted[0] != "big.mkv" {
 		t.Errorf("pass 1 should convert only the largest file, got %v", converted)
 	}
-	onDisk := readStateFile(t, cfg.StatePath)
+	onDisk := readStateFile(t, statePath)
 	if got := onDisk[filepath.Join(media, "big.mkv")]; got != (StateEntry{Outcome: OutcomeSmallGain}) {
 		t.Errorf("big.mkv recorded as %+v, want small_gain", got)
 	}
@@ -80,7 +80,7 @@ func TestProcessNextOrchestration(t *testing.T) {
 		"bad.mkv":   {Outcome: OutcomeFailed, Error: "probe: unreadable"},
 		"small.mkv": {Outcome: OutcomeFailed, Error: "boom"},
 	}
-	onDisk = readStateFile(t, cfg.StatePath)
+	onDisk = readStateFile(t, statePath)
 	for name, want := range expect {
 		if got, ok := onDisk[filepath.Join(media, name)]; !ok || got != want {
 			t.Errorf("%s: recorded %+v (ok=%v), want %+v", name, got, ok, want)

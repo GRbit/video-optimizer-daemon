@@ -203,7 +203,7 @@ func newDaemon(cfg Config, state *State, window *workWindow) *Daemon {
 	}
 	conv := converter{
 		tempDir: cfg.TempDirPath,
-		encode:  newEncoder(cfg, window).run,
+		encode:  newEncoder(cfg.HandbrakePresetsPath, cfg.Preset1080p, cfg.Preset2160p, window).run,
 		mux:     muxWithMkvmerge,
 		probe:   probeVideo,
 		confirm: confirm,

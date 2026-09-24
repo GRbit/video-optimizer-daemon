@@ -66,6 +66,31 @@ func fileSize(p string) int64 {
 	return info.Size()
 }
 
+func createTempFile(dir, pattern string) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("creating tmp file: %w", err)
+	}
+	closeCloser(f)
+	slog.Debug("Temp file created", "path", f.Name())
+	return f.Name(), nil
+}
+
+func removeTempFiles(paths []string) {
+	for _, f := range paths {
+		err := os.Remove(f)
+		switch {
+		case err == nil:
+			slog.Debug("Removed temp file", "path", f)
+		case os.IsNotExist(err):
+			// After a successful rename the temp file already lives at the
+			// final path, so its absence here is the normal outcome.
+		default:
+			slog.Warn("Failed to remove temp file", "path", f, "err", err)
+		}
+	}
+}
+
 func closeCloser(c io.Closer) {
 	if err := c.Close(); err != nil {
 		slog.Warn("Failed to close", "err", err)
