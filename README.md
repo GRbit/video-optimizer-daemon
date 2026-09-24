@@ -71,10 +71,12 @@ the following:
   threshold is recomputed on every scan.
 - The file has no entry in the state file.
 
-When using a media list file, the extension and modification time checks are
-not applied: any existing regular file from the list without a state entry is
-a candidate. Lines are taken in file order. Lines that do not point to an
-existing file are skipped and checked again on the next scan.
+A media list file is taken as the user's explicit order and none of the
+directory rules apply: no extension filter, no `-min-age`, no sorting by
+size. Lines are processed top to bottom, skipping those that do not point to
+an existing regular file (checked again on the next scan), those already in
+the state file, and those already in HEVC, since that is what the conversion
+is for.
 
 A candidate whose video track is already an optimized format (HEVC/H.265,
 AV1, AV2, VVC, DVHE, DVH1, HVC1, HVC2) is recorded as `skipped_hevc` and the
@@ -172,6 +174,12 @@ Outcomes are `done`, `skipped_hevc`, `declined` (refused in prompt mode),
 `failed: <error text>`. A file with an entry is never offered again.
 To retry a file, delete its entry; the file is written with indentation for
 exactly that purpose. Entries for files that no longer exist are harmless.
+
+The state file is the journal to read when something looks off. In
+particular, a `failed` entry containing `both files exist` means the new file
+was already placed in the library when a later step (permissions, deleting
+the original) failed: both the original and the converted file are there,
+nothing was lost, and the pair needs a manual look.
 
 The file is rewritten atomically (temp file plus rename) every time a file
 is recorded, so a crash never loses more than the entry being written.

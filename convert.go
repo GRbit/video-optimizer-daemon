@@ -373,15 +373,22 @@ func replaceOriginal(targetPath, finalPath string, sidecars []string) error {
 		slog.Debug("File renamed successfully", "path", newFilePath)
 	}
 
+	// From here on the new file is already in the library. A failure below
+	// leaves both files in place; the error text names that state explicitly
+	// because the state file is the journal the user will read, not the log.
+	bothExist := func(step string, err error) error {
+		return fmt.Errorf("%s: %w (both files exist: new %s next to original %s)", step, err, newFilePath, targetPath)
+	}
+
 	// os.CreateTemp hardcodes 0600; a media server running as another user
 	// could not read the result. Owner is left alone: chown needs root.
 	if err := os.Chmod(newFilePath, origStat.Mode().Perm()); err != nil {
-		return fmt.Errorf("copy permissions to new file: %w", err)
+		return bothExist("copy permissions to new file", err)
 	}
 	slog.Debug("Applied original permissions", "mode", origStat.Mode().Perm().String(), "path", newFilePath)
 
 	if err := os.Remove(targetPath); err != nil {
-		return fmt.Errorf("remove original file: %w", err)
+		return bothExist("remove original file", err)
 	}
 	slog.Debug("Original file removed", "path", targetPath)
 
