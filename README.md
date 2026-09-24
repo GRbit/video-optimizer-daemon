@@ -115,10 +115,15 @@ mkvmerge -o final.mkv [--audio-tracks ids] --no-subtitles --no-chapters --no-att
   audio tracks with the same language, only the first per language is kept.
 - Subtitles, chapters, attachments (for example ASS fonts) and tags come from
   the original file, so nothing the original carried is lost.
-- Sidecar files are merged in as extra sources. A sidecar is any file in the
-  same directory whose name starts with the original's name without extension
-  and ends in `.ass`, `.srt` or `.mka`. For `Movie.mkv` that means
-  `Movie.srt` and `Movie.en.ass`, but also `Movie 2.srt`.
+- Sidecar files are merged in as extra sources. A sidecar is a file in the
+  same directory with extension `.ass`, `.srt` or `.mka` whose name is the
+  original's name without extension, optionally followed by language codes,
+  bracketed tags or the words `forced`/`default`, separated by dots, spaces,
+  dashes or underscores. For `Episode 1.mkv` that means `Episode 1.srt`,
+  `Episode 1.en.srt`, `Episode 1 [en].srt` and `Episode 1.rus.forced.srt`,
+  but not `Episode 10.srt`, `Episode 1.5.srt` or `Episode 1 Extended.srt`.
+  Since merged sidecars are deleted afterwards, the match is strict on
+  purpose.
 
 ### Verification and replacement
 

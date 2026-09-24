@@ -213,16 +213,36 @@ func findSidecarFiles(targetPath string) ([]string, error) {
 
 	var sidecars []string
 	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || name == base || !strings.HasPrefix(name, stem) {
+		if entry.IsDir() || !isSidecarOf(stem, entry.Name()) {
 			continue
 		}
-		if !sidecarExtensions[strings.ToLower(filepath.Ext(name))] {
-			continue
-		}
-		sidecars = append(sidecars, filepath.Join(dir, name))
+		sidecars = append(sidecars, filepath.Join(dir, entry.Name()))
 	}
 	return sidecars, nil
+}
+
+// sidecarTail is what may follow the video's stem in a sidecar name: nothing,
+// or separator-delimited tokens that are a 2-3 letter language code (en, eng),
+// a bracketed tag ([en], [forced]) or a subtitle flag (forced, default).
+// A digit or a longer word after the stem means another file: "Episode 10",
+// "Episode 1.5", "Episode 1 Extended". A 3-letter word ("Movie 1 Cut") is the
+// accepted hole.
+var sidecarTail = regexp.MustCompile(`^(?:[ ._-]+(?:\[[^\]]*\]|[A-Za-z]{2,3}|(?i:forced|default)))*$`)
+
+// isSidecarOf reports whether name (a file next to the video) is a subtitle
+// or audio sidecar of the video whose name without extension is stem. Merged
+// sidecars are deleted afterwards, so a false positive destroys another
+// file's subtitles: the match is deliberately strict.
+func isSidecarOf(stem, name string) bool {
+	if !sidecarExtensions[strings.ToLower(filepath.Ext(name))] {
+		return false
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	tail, ok := strings.CutPrefix(base, stem)
+	if !ok {
+		return false
+	}
+	return sidecarTail.MatchString(tail)
 }
 
 // audioTracksToKeep returns the IDs of audio tracks in the encoded file, keeping

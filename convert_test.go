@@ -105,6 +105,41 @@ func TestOptimizedFilePath(t *testing.T) {
 	}
 }
 
+// Merged sidecars are deleted, so a false positive here loses another file's
+// subtitles for good. Every row is a real naming convention seen in the wild.
+func TestIsSidecarOf(t *testing.T) {
+	cases := []struct {
+		stem string
+		name string
+		want bool
+	}{
+		{"Episode 1", "Episode 1.srt", true},
+		{"Episode 1", "Episode 1.en.srt", true},
+		{"Episode 1", "Episode 1.eng.forced.srt", true},
+		{"Episode 1", "Episode 1 [en].srt", true},
+		{"Episode 1", "Episode 1 [en] [forced].srt", true},
+		{"Episode 1", "Episode 1.ru.default.ASS", true},
+		{"Episode 1", "Episode 1-en.mka", true},
+		{"Episode 1", "Episode 1.mkv", false}, // the video itself
+		{"Episode 1", "Episode 10.srt", false},
+		{"Episode 1", "Episode 1.5.srt", false},
+		{"Episode 1", "Episode 1 Extended.srt", false},
+		{"Episode 1", "Episode 1.nfo", false},
+		{"Episode 1", "Other.srt", false},
+		{"Movie", "Movie 2.srt", false},
+		{"Movie 1", "Movie 1 Cut.srt", true}, // accepted hole: 3 letters look like a language code
+		{"Show.S01E01.1080p", "Show.S01E01.1080p.srt", true},
+		{"Show.S01E01.1080p", "Show.S01E01.1080p.rus.forced.srt", true},
+		{"Show.S01E01.1080p", "Show.S01E010.1080p.srt", false},
+		{"Show.S01E01.1080p", "Show.S01E01.720p.srt", false},
+	}
+	for _, tc := range cases {
+		if got := isSidecarOf(tc.stem, tc.name); got != tc.want {
+			t.Errorf("isSidecarOf(%q, %q) = %v, want %v", tc.stem, tc.name, got, tc.want)
+		}
+	}
+}
+
 // Declining at the first prompt must end the conversion before anything is
 // encoded; the encoder here would fail loudly if it were reached.
 func TestConvertDeclinedBeforeEncoding(t *testing.T) {
