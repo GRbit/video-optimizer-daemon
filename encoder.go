@@ -137,6 +137,7 @@ func (e encoder) run(ctx context.Context, input, output, preset string, crf int)
 	// until HandBrake closes stderr, i.e. exits.
 	var tail []string
 	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		slog.Debug("HandBrakeCLI stderr", "line", line)
@@ -144,6 +145,12 @@ func (e encoder) run(ctx context.Context, input, output, preset string, crf int)
 		if len(tail) > stderrTailLines {
 			tail = tail[1:]
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		// An oversized line stops the scanner; keep draining so HandBrake
+		// never blocks on a full pipe and Wait can return.
+		slog.Warn("HandBrakeCLI stderr read stopped", "err", err)
+		_, _ = io.Copy(io.Discard, stderr)
 	}
 
 	if err := cmd.Wait(); err != nil {

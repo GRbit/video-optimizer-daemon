@@ -56,7 +56,7 @@ func makeVideo(t *testing.T, path string, seconds int) {
 
 func mustProbe(t *testing.T, path string) VideoFacts {
 	t.Helper()
-	facts, err := probeVideo(path)
+	facts, err := probeVideo(context.Background(), path)
 	if err != nil {
 		t.Fatalf("probeVideo(%s): %v", path, err)
 	}
@@ -141,7 +141,7 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 		}
 	}
 
-	info, err := getMkvMergeInfo(result)
+	info, err := getMkvMergeInfo(context.Background(), result)
 	if err != nil {
 		t.Fatal(err)
 	}

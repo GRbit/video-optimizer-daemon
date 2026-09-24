@@ -25,6 +25,22 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
+	// A mistyped media dir or an unmounted volume would otherwise look like an
+	// empty library: "No eligible files found" every minute, forever.
+	if cfg.MediaListPath != "" {
+		if st, err := os.Stat(cfg.MediaListPath); err != nil {
+			problems = append(problems, fmt.Sprintf("media list %s: %v", cfg.MediaListPath, err))
+		} else if st.IsDir() {
+			problems = append(problems, fmt.Sprintf("media list %s is a directory", cfg.MediaListPath))
+		}
+	} else {
+		if st, err := os.Stat(cfg.MediaDir); err != nil {
+			problems = append(problems, fmt.Sprintf("media dir %s: %v", cfg.MediaDir, err))
+		} else if !st.IsDir() {
+			problems = append(problems, fmt.Sprintf("media dir %s is not a directory", cfg.MediaDir))
+		}
+	}
+
 	names, err := presetNames(cfg.HandbrakePresetsPath)
 	if err != nil {
 		problems = append(problems, err.Error())

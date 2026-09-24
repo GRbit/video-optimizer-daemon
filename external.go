@@ -35,11 +35,11 @@ type MkvMergeOutput struct {
 
 // runJSON runs an external tool that prints JSON on stdout and decodes it
 // into dst. Both streams go to the debug log; on failure stderr goes to error.
-func runJSON(name string, args []string, dst any) error {
+func runJSON(ctx context.Context, name string, args []string, dst any) error {
 	slog.Debug("Running "+name, "args", args)
 
 	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
@@ -54,9 +54,9 @@ func runJSON(name string, args []string, dst any) error {
 	return nil
 }
 
-func getMkvMergeInfo(path string) (*MkvMergeOutput, error) {
+func getMkvMergeInfo(ctx context.Context, path string) (*MkvMergeOutput, error) {
 	var data MkvMergeOutput
-	if err := runJSON(mkvmergeBin, []string{"-J", path}, &data); err != nil {
+	if err := runJSON(ctx, mkvmergeBin, []string{"-J", path}, &data); err != nil {
 		return nil, err
 	}
 	return &data, nil

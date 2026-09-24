@@ -91,7 +91,7 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))
 
 	slog.Debug("Checking audio tracks on converted file", "path", encodedPath)
-	encodedInfo, err := getMkvMergeInfo(encodedPath)
+	encodedInfo, err := getMkvMergeInfo(ctx, encodedPath)
 	if err != nil {
 		return convertReplaced, err
 	}
@@ -116,7 +116,7 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 	}
 	slog.Debug("Final mux successful", "path", finalPath)
 
-	finalFacts, err := probeVideo(finalPath)
+	finalFacts, err := probeVideo(ctx, finalPath)
 	if err != nil {
 		return convertReplaced, fmt.Errorf("probe converted file: %w", err)
 	}

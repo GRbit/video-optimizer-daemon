@@ -190,7 +190,7 @@ type Daemon struct {
 	scan    scanSettings
 	state   *State
 	window  *workWindow
-	probe   func(path string) (VideoFacts, error)
+	probe   func(ctx context.Context, path string) (VideoFacts, error)
 	convert func(ctx context.Context, path string, facts VideoFacts) (convertResult, error)
 }
 
@@ -270,7 +270,7 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 			return false, ctx.Err()
 		}
 
-		facts, err := d.probe(path)
+		facts, err := d.probe(ctx, path)
 		if err != nil {
 			slog.Warn("Skipping file: probe failed", "path", path, "err", err)
 			d.record(path, StateEntry{Outcome: OutcomeFailed, Error: "probe: " + err.Error()})

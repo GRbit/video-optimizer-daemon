@@ -37,7 +37,7 @@ func TestProcessNextOrchestration(t *testing.T) {
 	d := &Daemon{
 		scan:  scanSettings{mediaDir: media, minAge: time.Hour},
 		state: state,
-		probe: func(path string) (VideoFacts, error) {
+		probe: func(ctx context.Context, path string) (VideoFacts, error) {
 			switch filepath.Base(path) {
 			case "hevc.mkv":
 				return VideoFacts{CodecID: "V_MPEGH/ISO/HEVC"}, nil

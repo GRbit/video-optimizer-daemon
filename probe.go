@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -40,9 +41,9 @@ type mediaInfoOutput struct {
 // probeVideo runs mediainfo and reduces its output to VideoFacts. The first
 // video track is the one that matters: a second one, when present, is cover
 // art or a thumbnail stream.
-func probeVideo(path string) (VideoFacts, error) {
+func probeVideo(ctx context.Context, path string) (VideoFacts, error) {
 	var out mediaInfoOutput
-	if err := runJSON(mediainfoBin, []string{"--fullscan", "--Output=JSON", path}, &out); err != nil {
+	if err := runJSON(ctx, mediainfoBin, []string{"--fullscan", "--Output=JSON", path}, &out); err != nil {
 		return VideoFacts{}, err
 	}
 	// mediainfo exits 0 and prints "media": null for a file it cannot open.

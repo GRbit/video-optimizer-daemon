@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestProbeVideo(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "clip.mp4")
 	makeVideo(t, path, 2)
 
-	facts, err := probeVideo(path)
+	facts, err := probeVideo(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,7 @@ func TestProbeVideo(t *testing.T) {
 		t.Error("h264 source must not count as already optimized")
 	}
 
-	if _, err := probeVideo(filepath.Join(t.TempDir(), "missing.mkv")); err == nil {
+	if _, err := probeVideo(context.Background(), filepath.Join(t.TempDir(), "missing.mkv")); err == nil {
 		t.Error("probe of a missing file should fail")
 	}
 }
