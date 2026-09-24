@@ -159,6 +159,30 @@ func (e encoder) run(ctx context.Context, input, output, preset string, crf int)
 func pauseOutsideWindow(w *workWindow) processHook {
 	return func(ctx context.Context, proc *os.Process) {
 		paused := false
+		sync := func() {
+			inside := w.contains(time.Now())
+			switch {
+			case !inside && !paused:
+				if err := proc.Signal(syscall.SIGSTOP); err != nil {
+					slog.Debug("SIGSTOP failed", "pid", proc.Pid, "err", err)
+					return
+				}
+				paused = true
+				slog.Info("Work interval closed, encoder paused", "pid", proc.Pid, "resume_at", w.nextChange(time.Now()).Format(time.RFC3339))
+			case inside && paused:
+				if err := proc.Signal(syscall.SIGCONT); err != nil {
+					slog.Debug("SIGCONT failed", "pid", proc.Pid, "err", err)
+					return
+				}
+				paused = false
+				slog.Info("Work interval opened, encoder resumed", "pid", proc.Pid)
+			}
+		}
+
+		// The process may already be outside the interval when it starts;
+		// waiting for the next boundary would let it run the whole closed
+		// period.
+		sync()
 		for {
 			next := w.nextChange(time.Now())
 			select {
@@ -167,24 +191,7 @@ func pauseOutsideWindow(w *workWindow) processHook {
 			// The extra second lands safely inside the next minute.
 			case <-time.After(time.Until(next) + time.Second):
 			}
-
-			inside := w.contains(time.Now())
-			switch {
-			case !inside && !paused:
-				if err := proc.Signal(syscall.SIGSTOP); err != nil {
-					slog.Debug("SIGSTOP failed", "pid", proc.Pid, "err", err)
-					continue
-				}
-				paused = true
-				slog.Info("Work window closed, encoder paused", "pid", proc.Pid, "resume_at", w.nextChange(time.Now()).Format(time.RFC3339))
-			case inside && paused:
-				if err := proc.Signal(syscall.SIGCONT); err != nil {
-					slog.Debug("SIGCONT failed", "pid", proc.Pid, "err", err)
-					continue
-				}
-				paused = false
-				slog.Info("Work window opened, encoder resumed", "pid", proc.Pid)
-			}
+			sync()
 		}
 	}
 }

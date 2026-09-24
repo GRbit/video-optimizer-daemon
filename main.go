@@ -283,6 +283,12 @@ func (d *Daemon) processNext(ctx context.Context) (bool, error) {
 		}
 
 		slog.Info("Found target candidate", "path", path)
+		// The probe walk above can outlast the work interval on a first run
+		// over a library full of HEVC files; an encode must never start
+		// outside it.
+		if !d.window.waitUntilOpen(ctx) {
+			return false, ctx.Err()
+		}
 		res, err := d.convert(ctx, path, facts)
 		if ctx.Err() != nil {
 			// Shutdown interrupted the task; leave it eligible for the next start.
