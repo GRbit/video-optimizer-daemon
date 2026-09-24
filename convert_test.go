@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -140,33 +141,148 @@ func TestIsSidecarOf(t *testing.T) {
 	}
 }
 
-// Declining at the first prompt must end the conversion before anything is
-// encoded; the encoder here would fail loudly if it were reached.
-func TestConvertDeclinedBeforeEncoding(t *testing.T) {
-	captureLogs(t)
-	dir := t.TempDir()
-	orig := filepath.Join(dir, "Movie.mkv")
-	touch(t, orig)
+// fakeConverter wires closures for every seam: encode writes encodedSize
+// bytes, mux copies the encoded file, probe reports the given duration. The
+// converter's policy (confirm, encode, mux, verify, savings, confirm, replace)
+// runs for real on real files in a temp dir, without any external tool.
+type fakeConverter struct {
+	conv     converter
+	encoded  int
+	answers  []bool
+	asked    int
+	encodes  int
+	duration float64
+}
 
-	asked := 0
-	conv := converter{
-		tempDir: dir,
-		encoder: encoder{presetsPath: "/nonexistent", preset1080p: "p"},
+func newFakeConverter(t *testing.T, tempDir string) *fakeConverter {
+	f := &fakeConverter{duration: 100}
+	f.conv = converter{
+		tempDir: tempDir,
+		encode: func(ctx context.Context, facts VideoFacts, input, output string) error {
+			f.encodes++
+			return os.WriteFile(output, make([]byte, f.encoded), 0o600)
+		},
+		mux: func(ctx context.Context, output, encoded, original string, sidecars []string) error {
+			return copyFile(encoded, output)
+		},
+		probe: func(ctx context.Context, path string) (VideoFacts, error) {
+			return VideoFacts{Duration: f.duration}, nil
+		},
 		confirm: func(ctx context.Context, question string) (bool, error) {
-			asked++
-			return false, nil
+			f.asked++
+			if f.asked > len(f.answers) {
+				t.Fatalf("confirm asked %d times, only %d answers prepared", f.asked, len(f.answers))
+			}
+			return f.answers[f.asked-1], nil
 		},
 	}
-	res, err := conv.convert(context.Background(), orig, VideoFacts{Width: 1920, Height: 1080})
-	if err != nil || res != convertDeclined {
-		t.Errorf("convert = (%v, %v), want (convertDeclined, nil)", res, err)
+	return f
+}
+
+func TestConvertPolicy(t *testing.T) {
+	captureLogs(t)
+	facts := VideoFacts{Width: 1920, Height: 1080, Duration: 100}
+
+	setup := func(t *testing.T) (dir, orig string) {
+		dir = t.TempDir()
+		orig = filepath.Join(dir, "Movie.mkv")
+		if err := os.WriteFile(orig, make([]byte, 1000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir, orig
 	}
-	if asked != 1 {
-		t.Errorf("confirm asked %d times, want 1", asked)
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	tempClean := func(t *testing.T, dir string) {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "video_") {
+				t.Errorf("temp file left behind: %s", e.Name())
+			}
+		}
 	}
-	if _, err := os.Stat(orig); err != nil {
-		t.Errorf("declined conversion must leave the original: %v", err)
-	}
+
+	t.Run("declined before encoding", func(t *testing.T) {
+		dir, orig := setup(t)
+		f := newFakeConverter(t, dir)
+		f.answers = []bool{false}
+		res, err := f.conv.convert(context.Background(), orig, facts)
+		if err != nil || res != convertDeclined {
+			t.Errorf("convert = (%v, %v), want (convertDeclined, nil)", res, err)
+		}
+		if f.encodes != 0 {
+			t.Errorf("nothing must be encoded after a decline, encodes=%d", f.encodes)
+		}
+		if !exists(orig) {
+			t.Error("original must stay")
+		}
+	})
+
+	t.Run("gain too small keeps original", func(t *testing.T) {
+		dir, orig := setup(t)
+		f := newFakeConverter(t, dir)
+		f.answers = []bool{true}
+		f.encoded = 950
+		res, err := f.conv.convert(context.Background(), orig, facts)
+		if err != nil || res != convertGainTooSmall {
+			t.Errorf("convert = (%v, %v), want (convertGainTooSmall, nil)", res, err)
+		}
+		if f.asked != 1 {
+			t.Errorf("no replacement prompt when the original is kept, asked=%d", f.asked)
+		}
+		if !exists(orig) || exists(filepath.Join(dir, "Movie.x265.mkv")) {
+			t.Error("original must stay and no new file may appear")
+		}
+		tempClean(t, dir)
+	})
+
+	t.Run("declined at replacement", func(t *testing.T) {
+		dir, orig := setup(t)
+		f := newFakeConverter(t, dir)
+		f.answers = []bool{true, false}
+		f.encoded = 100
+		res, err := f.conv.convert(context.Background(), orig, facts)
+		if err != nil || res != convertDeclined {
+			t.Errorf("convert = (%v, %v), want (convertDeclined, nil)", res, err)
+		}
+		if !exists(orig) || exists(filepath.Join(dir, "Movie.x265.mkv")) {
+			t.Error("original must stay and no new file may appear")
+		}
+		tempClean(t, dir)
+	})
+
+	t.Run("truncated output fails before replacement", func(t *testing.T) {
+		dir, orig := setup(t)
+		f := newFakeConverter(t, dir)
+		f.answers = []bool{true}
+		f.encoded = 100
+		f.duration = 80
+		_, err := f.conv.convert(context.Background(), orig, facts)
+		if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
+			t.Errorf("err = %v, want duration mismatch", err)
+		}
+		if !exists(orig) {
+			t.Error("original must stay")
+		}
+		tempClean(t, dir)
+	})
+
+	t.Run("replaced", func(t *testing.T) {
+		dir, orig := setup(t)
+		f := newFakeConverter(t, dir)
+		f.answers = []bool{true, true}
+		f.encoded = 100
+		res, err := f.conv.convert(context.Background(), orig, facts)
+		if err != nil || res != convertReplaced {
+			t.Errorf("convert = (%v, %v), want (convertReplaced, nil)", res, err)
+		}
+		if exists(orig) {
+			t.Error("original must be gone")
+		}
+		if st, err := os.Stat(filepath.Join(dir, "Movie.x265.mkv")); err != nil || st.Size() != 100 {
+			t.Errorf("new file missing or wrong size: %v", err)
+		}
+		tempClean(t, dir)
+	})
 }
 
 func touch(t *testing.T, path string) {

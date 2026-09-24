@@ -54,6 +54,18 @@ func makeVideo(t *testing.T, path string, seconds int) {
 	}
 }
 
+// realConverter wires the production adapters (fake HandBrakeCLI on PATH,
+// real mkvmerge and mediainfo) with no prompt.
+func realConverter(cfg Config) converter {
+	return converter{
+		tempDir: cfg.TempDirPath,
+		encode:  newEncoder(cfg, nil).run,
+		mux:     muxWithMkvmerge,
+		probe:   probeVideo,
+		confirm: alwaysConfirm,
+	}
+}
+
 func mustProbe(t *testing.T, path string) VideoFacts {
 	t.Helper()
 	facts, err := probeVideo(context.Background(), path)
@@ -110,7 +122,7 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 	touch(t, filepath.Join(media, "Movie 2.mkv"))
 	origSize := fileSize(orig)
 
-	conv := converter{tempDir: cfg.TempDirPath, encoder: newEncoder(cfg, nil), confirm: alwaysConfirm}
+	conv := realConverter(cfg)
 	res, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, logs.String())
@@ -141,8 +153,8 @@ func TestPipelineReplacesOriginalAndMergesSidecars(t *testing.T) {
 		}
 	}
 
-	info, err := getMkvMergeInfo(context.Background(), result)
-	if err != nil {
+	var info mkvMergeOutput
+	if err := runJSON(context.Background(), mkvmergeBin, []string{"-J", result}, &info); err != nil {
 		t.Fatal(err)
 	}
 	types := map[string]int{}
@@ -170,7 +182,7 @@ func TestPipelineKeepsOriginalWhenOutputTruncated(t *testing.T) {
 	orig := filepath.Join(media, "Long.h264.mp4")
 	makeVideo(t, orig, 15)
 
-	conv := converter{tempDir: cfg.TempDirPath, encoder: newEncoder(cfg, nil), confirm: alwaysConfirm}
+	conv := realConverter(cfg)
 	_, err := conv.convert(context.Background(), orig, mustProbe(t, orig))
 	if err == nil || !strings.Contains(err.Error(), "duration mismatch") {
 		t.Fatalf("Run err = %v, want duration mismatch", err)

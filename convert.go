@@ -26,7 +26,9 @@ const minSavingsPercent = 10.0
 // conversion: per-file state (paths, temp files) lives inside convert.
 type converter struct {
 	tempDir string
-	encoder encoder
+	encode  func(ctx context.Context, facts VideoFacts, input, output string) error
+	mux     muxFunc
+	probe   func(ctx context.Context, path string) (VideoFacts, error)
 	confirm confirmFunc
 }
 
@@ -82,17 +84,10 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 
 	slog.Info("Starting HandBrake conversion", "path", targetPath)
 	started := time.Now()
-	if err := c.encoder.run(ctx, facts, targetPath, encodedPath); err != nil {
+	if err := c.encode(ctx, facts, targetPath, encodedPath); err != nil {
 		return convertReplaced, fmt.Errorf("run handbrake: %w", err)
 	}
 	slog.Info("HandBrake finished", "took", time.Since(started).Round(time.Second))
-
-	slog.Debug("Checking audio tracks on converted file", "path", encodedPath)
-	encodedInfo, err := getMkvMergeInfo(ctx, encodedPath)
-	if err != nil {
-		return convertReplaced, err
-	}
-	keepAudio := audioTracksToKeep(encodedInfo)
 
 	sidecars, err := findSidecarFiles(targetPath)
 	if err != nil {
@@ -107,13 +102,12 @@ func (c converter) convert(ctx context.Context, targetPath string, facts VideoFa
 		return convertReplaced, fmt.Errorf("creating video_final: %w", err)
 	}
 
-	args := mkvmergeArgs(finalPath, encodedPath, targetPath, keepAudio, sidecars)
-	if err := runMkvmerge(ctx, args); err != nil {
-		return convertReplaced, fmt.Errorf("mkvmerge final mux: %w", err)
+	if err := c.mux(ctx, finalPath, encodedPath, targetPath, sidecars); err != nil {
+		return convertReplaced, fmt.Errorf("mux final file: %w", err)
 	}
 	slog.Debug("Final mux successful", "path", finalPath)
 
-	finalFacts, err := probeVideo(ctx, finalPath)
+	finalFacts, err := c.probe(ctx, finalPath)
 	if err != nil {
 		return convertReplaced, fmt.Errorf("probe converted file: %w", err)
 	}
@@ -240,46 +234,6 @@ func isSidecarOf(stem, name string) bool {
 		return false
 	}
 	return sidecarTail.MatchString(tail)
-}
-
-// audioTracksToKeep returns the IDs of audio tracks in the encoded file, keeping
-// the first track per language. Video and subtitle IDs are excluded on purpose:
-// mkvmerge ignores them in --audio-tracks, but they make the logged command lie.
-func audioTracksToKeep(info *MkvMergeOutput) []string {
-	seenLangs := make(map[string]bool)
-	var keep []string
-
-	for _, track := range info.Tracks {
-		if !strings.EqualFold(track.Type, "audio") {
-			continue
-		}
-		lang := track.Properties.Language
-		if lang == "" {
-			lang = "und"
-		}
-		if seenLangs[lang] {
-			slog.Info("Dropping duplicate audio track", "language", lang, "track_id", track.ID)
-			continue
-		}
-		seenLangs[lang] = true
-		keep = append(keep, strconv.Itoa(track.ID))
-	}
-	return keep
-}
-
-// mkvmergeArgs builds the single mkvmerge invocation that assembles the final
-// file: video and audio come from the HandBrake output, everything else
-// (subtitles, chapters, attachments such as ASS fonts, tags) from the original,
-// and sidecars are appended as extra sources.
-func mkvmergeArgs(output, encoded, original string, keepAudio, sidecars []string) []string {
-	args := []string{"-o", output}
-	if len(keepAudio) > 0 {
-		args = append(args, "--audio-tracks", strings.Join(keepAudio, ","))
-	}
-	args = append(args, "--no-subtitles", "--no-chapters", "--no-attachments", encoded)
-	args = append(args, "--no-video", "--no-audio", original)
-	args = append(args, sidecars...)
-	return args
 }
 
 // h264CodecToken matches "x264", "h264", "h.264" in any case. A trailing digit is
