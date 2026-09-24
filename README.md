@@ -30,10 +30,10 @@ video-optimizer-daemon [-media-dir=directory] [-media-list=path]
   the final mkvmerge assembly, together roughly twice the size of the result.
 
 All of this is checked at start. A missing tool, a preset name that is not in
-the file, an unwritable temp or state directory, or `-prompt` without a
-terminal makes the daemon exit with a message listing every problem found.
-Nothing is written to the state file in that case: these are configuration
-errors, not file errors.
+the file, a media directory (or media list file) that does not exist, an
+unwritable temp or state directory, or `-prompt` without a terminal makes the
+daemon exit with a message listing every problem found. Nothing is written to
+the state file in that case: these are configuration errors, not file errors.
 
 ## BUILD AND RUN
 
@@ -48,8 +48,9 @@ Run it as the user who owns the media files: the daemon replaces files in
 place and copies their permission bits, but it cannot change ownership.
 
 To stop it, send SIGINT or SIGTERM (Ctrl-C, `docker stop`). A running
-HandBrake or mkvmerge is killed, temp files are removed, and the interrupted
-file is not recorded in the state, so it is picked up first on the next start.
+HandBrake, mkvmerge or mediainfo is killed, temp files are removed, and the
+interrupted file is not recorded in the state, so it is picked up first on
+the next start.
 
 ## DESCRIPTION
 
@@ -208,7 +209,9 @@ not paused.
 would do. It asks before starting each conversion and again, with the sizes
 of both files, before replacing the original. The user must type `y` or `yes`
 to proceed. Any other answer records the file as `declined`, which is how a
-file is permanently excluded (see [State file](#state-file)).
+file is permanently excluded (see [State file](#state-file)). The second
+question is skipped when the result is not worth keeping: a `small_gain`
+outcome keeps the original without asking.
 
 There is no environment variable for it, and the daemon refuses to start with
 `-prompt` when stdin is not a terminal.
@@ -227,8 +230,11 @@ stdout (the progress line) is discarded.
 : Directory to scan for media files. Default: `/media`.
 
 **-media-list=path**
-: Path to a file listing media files (one absolute path per line). If set,
-  the daemon uses this list instead of scanning a directory.
+: Path to a file listing media files, one path per line. If set, the daemon
+  uses this list instead of scanning a directory. Use absolute paths: a
+  relative one is resolved against the daemon's working directory and is
+  recorded in the state file as written, so it stops matching if the daemon
+  is later started from elsewhere.
 
 **-handbrake-conf=path**
 : Path to HandBrake presets JSON file. Default:
@@ -306,10 +312,13 @@ MEDIA_DIR=/srv/media
 TEMP_DIR=/srv/tmp
 PUID=1000
 PGID=1000
-# optional
+# optional, defaults shown where the daemon has one
 GHB_DIR=/home/user/.config/ghb   # directory with presets.json, default ~/.config/ghb
 MEDIA_LIST_PATH=/srv/lists/todo.txt
 STATE_PATH=/srv/media/.video-optimizer-state.json
+MIN_AGE=720h
+PRESET_1080P=slow-1080p-20
+PRESET_2160P=slow-2160p-20
 WORK_HOURS=23:00-07:00
 TZ=Europe/Berlin                 # work hours are in the container's local time
 LOG_LEVEL=info
